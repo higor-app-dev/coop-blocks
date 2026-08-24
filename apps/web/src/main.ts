@@ -30,6 +30,7 @@ import {
 } from "./audio";
 import { createBossLayer } from "./boss";
 import { startSolo, type SoloSession } from "./solo";
+import { createMenu, type MenuChoice } from "./menu";
 
 // ===== Configuração do jogo =====
 // Canvas dentro do container #app (100% da viewport). letterbox mantém a
@@ -249,7 +250,7 @@ const input = createInput(k, {
 // confirmar dispara shop_ready (servidor) ou avança a fase local (solo).
 const shop = createShop({
   onBuy: (upgrade) => {
-    if (phaseState) {
+    if (phaseState && server) {
       // Multiplayer: o servidor valida, debita e responde shop_buy_result.
       server.sendShopBuy(upgrade);
       return;
@@ -258,7 +259,7 @@ const shop = createShop({
     solo.buy(upgrade);
   },
   onReady: () => {
-    if (phaseState) {
+    if (phaseState && server) {
       server.sendShopReady();
       return;
     }
@@ -292,119 +293,204 @@ const solo: SoloSession = startSolo({
   },
 });
 
-// ===== Multiplayer (WebSocket) =====
+// ===== Multiplayer (WebSocket) — iniciado sob demanda pelo menu =====
+// No modo Solo NENHUM WebSocket é aberto (o jogo roda 100% no client). Só
+// quando o jogador escolhe "Multijogador" no menu o connectToServer é
+// instanciado e o loop de conexão/reconexão começa.
 const netPlayers: NetPlayer[] = [];
-const server = connectToServer(k, {
-  // VITE_API_URL (build-time, Vercel) aponta para o backend real quando o
-  // front não é servido pelo nginx same-origin (ex.: mirror Vercel). Sem a
-  // env, mantém a URL relativa → reverse proxy same-origin da produção.
-  url: import.meta.env.VITE_API_URL ?? "/api/ws",
-  player,
-  onPlayers: (list) => {
-    netPlayers.length = 0;
-    for (const np of list) {
-      // PlayerState não carrega id no wire — o welcome inclui o PRÓPRIO
-      // jogador sem id; pular entradas sem id evita linha fantasma
-      // ("Jogador" com id undefined) no painel do HUD.
-      if (!np.id || np.id === server.myId()) continue;
-      netPlayers.push(np);
-    }
-  },
-  onPlayerJoin: (np) => {
-    if (np.id !== server.myId() && !netPlayers.find((p) => p.id === np.id)) {
-      netPlayers.push(np);
-    }
-  },
-  onPlayerLeave: (id) => {
-    const i = netPlayers.findIndex((p) => p.id === id);
-    if (i >= 0) {
-      netPlayers.splice(i, 1);
-    }
-  },
-  // Estado da conexão → indicador visual (net lifecycle).
-  onStatus: setNetStatus,
-  // Fase da run: abre/fecha a loja e reconstrói o mundo quando o servidor
-  // broadcasta o próximo mapa (todos prontos). O primeiro broadcast de fase
-  // também desliga o motor solo (setServerDriven(true)) — o servidor assume.
-  onPhase: (state) => {
-    phaseState = state;
-    solo.setServerDriven(true);
-    if (state.phase === "shop") {
-      // Loja aberta: overlay visível com saldo/catálogo/prontos.
-      shop.update(state, server.myId());
-      return;
-    }
-    // phase=playing: esconde a loja; mapa novo → reconstrói o mundo com o
-    // teto de vida efetivo (upgrades de max_hp comprados na loja).
-    shop.update(state, server.myId());
-    if (state.number !== currentLevelNumber) {
-      const mine = state.players.find((p) => p.id === server.myId());
-      currentLevelNumber = state.number;
-      playerMaxHp = mine?.stats.maxHp ?? playerMaxHp;
-      solo.buildWorld(state.number, playerMaxHp);
-    }
-  },
-  // Moedas do servidor (estado completo + remoções + contadores por jogador):
-  // o primeiro broadcast assume a autoridade — as moedas locais da fase
-  // inicial (geradas antes da conexão) são descartadas e a renderização passa
-  // a espelhar exatamente o que o servidor manda. Remoções são aplicadas
-  // ANTES do estado completo para o efeito de coleta não se perder quando a
-  // moeda coletada já saiu do estado restante no mesmo broadcast.
-  onCoins: ({ coins, removed, counts }) => {
-    if (!serverCoins) {
-      serverCoins = true;
+type NetClient = ReturnType<typeof connectToServer>;
+let server: NetClient | null = null;
+
+function startMultiplayer(): void {
+  if (server) return; // já conectado (idempotente)
+  const net = connectToServer(k, {
+    // VITE_API_URL (build-time, Vercel) aponta para o backend real quando o
+    // front não é servido pelo nginx same-origin (ex.: mirror Vercel). Sem a
+    // env, mantém a URL relativa → reverse proxy same-origin da produção.
+    url: import.meta.env.VITE_API_URL ?? "/api/ws",
+    player,
+    onPlayers: (list) => {
+      netPlayers.length = 0;
+      for (const np of list) {
+        // PlayerState não carrega id no wire — o welcome inclui o PRÓPRIO
+        // jogador sem id; pular entradas sem id evita linha fantasma
+        // ("Jogador" com id undefined) no painel do HUD.
+        if (!np.id || np.id === net.myId()) continue;
+        netPlayers.push(np);
+      }
+    },
+    onPlayerJoin: (np) => {
+      if (np.id !== net.myId() && !netPlayers.find((p) => p.id === np.id)) {
+        netPlayers.push(np);
+      }
+    },
+    onPlayerLeave: (id) => {
+      const i = netPlayers.findIndex((p) => p.id === id);
+      if (i >= 0) {
+        netPlayers.splice(i, 1);
+      }
+    },
+    // Estado da conexão → indicador visual (net lifecycle).
+    onStatus: setNetStatus,
+    // Fase da run: abre/fecha a loja e reconstrói o mundo quando o servidor
+    // broadcasta o próximo mapa (todos prontos). O primeiro broadcast de fase
+    // também desliga o motor solo (setServerDriven(true)) — o servidor assume.
+    onPhase: (state) => {
+      phaseState = state;
       solo.setServerDriven(true);
-      coinLayer.clear();
-    }
-    if (removed.length > 0) coinLayer.applyRemoved(removed);
-    coinLayer.applyFull(coins);
-    coinCounts = counts;
-  },
-  // Resposta individual de compra: comprovante atualiza a tela na hora;
-  // erro (moedas insuficientes, nível máximo) aparece na loja.
-  onShopBuyResult: (rc) => {
-    if ("ok" in rc) {
-      shop.showError(rc.error);
-      return;
-    }
-    shop.applyBuyResult(rc);
-  },
-  // Erro de pronto (ex.: fora da loja) — mostra na tela e deixa tentar de novo.
-  onShopReadyError: (err) => shop.showError(err),
-  // Boss da fase (fases múltiplas de 5): espelha posição/estado/HP do
-  // servidor — o bloco aparece/some conforme o broadcast (null esconde).
-  onBoss: (state) => {
-    solo.setServerDriven(true);
-    bossLayer.apply(state);
-  },
-  // Power-ups do servidor (estado completo + remoções + efeitos por jogador):
-  // o primeiro broadcast assume a autoridade (camada local/antiga descartada)
-  // e a renderização passa a espelhar exatamente o que o servidor manda.
-  // Remoções são aplicadas ANTES do estado completo para o efeito de coleta
-  // não se perder quando o power-up coletado já saiu do estado restante no
-  // mesmo broadcast. Os efeitos alimentam o HUD, o tiro triplo e a bolha de
-  // escudo — o client só REFLETE o que o servidor decidiu.
-  onPowerUps: ({ powerUps, removed, effects }) => {
-    solo.setServerDriven(true);
-    if (removed.length > 0) powerUpLayer.applyRemoved(removed);
-    powerUpLayer.applyFull(powerUps);
-    powerUpEffects = effects;
-    // Efeito VIDA no jogador local: o servidor elevou o HP acima do teto
-    // (BoostHPAboveMax — 100 → 125). O client espelha o estado autoritativo
-    // (max() evita "curar" — só sobe quando o servidor diz que o bônus existe).
-    const mine = effects[server.myId()];
-    if (mine && mine.vida > 0) {
-      player.hp = Math.max(player.hp, playerMaxHp + mine.vida);
+      if (state.phase === "shop") {
+        // Loja aberta: overlay visível com saldo/catálogo/prontos.
+        shop.update(state, net.myId());
+        return;
+      }
+      // phase=playing: esconde a loja; mapa novo → reconstrói o mundo com o
+      // teto de vida efetivo (upgrades de max_hp comprados na loja).
+      shop.update(state, net.myId());
+      if (state.number !== currentLevelNumber) {
+        const mine = state.players.find((p) => p.id === net.myId());
+        currentLevelNumber = state.number;
+        playerMaxHp = mine?.stats.maxHp ?? playerMaxHp;
+        solo.buildWorld(state.number, playerMaxHp);
+      }
+    },
+    // Moedas do servidor (estado completo + remoções + contadores por jogador):
+    // o primeiro broadcast assume a autoridade — as moedas locais da fase
+    // inicial (geradas antes da conexão) são descartadas e a renderização passa
+    // a espelhar exatamente o que o servidor manda. Remoções são aplicadas
+    // ANTES do estado completo para o efeito de coleta não se perder quando a
+    // moeda coletada já saiu do estado restante no mesmo broadcast.
+    onCoins: ({ coins, removed, counts }) => {
+      if (!serverCoins) {
+        serverCoins = true;
+        solo.setServerDriven(true);
+        coinLayer.clear();
+      }
+      if (removed.length > 0) coinLayer.applyRemoved(removed);
+      coinLayer.applyFull(coins);
+      coinCounts = counts;
+    },
+    // Resposta individual de compra: comprovante atualiza a tela na hora;
+    // erro (moedas insuficientes, nível máximo) aparece na loja.
+    onShopBuyResult: (rc) => {
+      if ("ok" in rc) {
+        shop.showError(rc.error);
+        return;
+      }
+      shop.applyBuyResult(rc);
+    },
+    // Erro de pronto (ex.: fora da loja) — mostra na tela e deixa tentar de novo.
+    onShopReadyError: (err) => shop.showError(err),
+    // Boss da fase (fases múltiplas de 5): espelha posição/estado/HP do
+    // servidor — o bloco aparece/some conforme o broadcast (null esconde).
+    onBoss: (state) => {
+      solo.setServerDriven(true);
+      bossLayer.apply(state);
+    },
+    // Power-ups do servidor (estado completo + remoções + efeitos por jogador):
+    // o primeiro broadcast assume a autoridade (camada local/antiga descartada)
+    // e a renderização passa a espelhar exatamente o que o servidor manda.
+    // Remoções são aplicadas ANTES do estado completo para o efeito de coleta
+    // não se perder quando o power-up coletado já saiu do estado restante no
+    // mesmo broadcast. Os efeitos alimentam o HUD, o tiro triplo e a bolha de
+    // escudo — o client só REFLETE o que o servidor decidiu.
+    onPowerUps: ({ powerUps, removed, effects }) => {
+      solo.setServerDriven(true);
+      if (removed.length > 0) powerUpLayer.applyRemoved(removed);
+      powerUpLayer.applyFull(powerUps);
+      powerUpEffects = effects;
+      // Efeito VIDA no jogador local: o servidor elevou o HP acima do teto
+      // (BoostHPAboveMax — 100 → 125). O client espelha o estado autoritativo
+      // (max() evita "curar" — só sobe quando o servidor diz que o bônus existe).
+      const mine = effects[net.myId()];
+      if (mine && mine.vida > 0) {
+        player.hp = Math.max(player.hp, playerMaxHp + mine.vida);
+      }
+    },
+  });
+  server = net;
+
+  // Desconecta o WebSocket ao sair/recarregar a página (net lifecycle): fecha
+  // o socket e interrompe o loop de reconexão — sem vazamento nem tentativas
+  // infinitas em segundo plano. pagehide cobre mobile (browser pode não
+  // disparar beforeunload de forma confiável).
+  const disconnect = () => net.disconnect();
+  window.addEventListener("pagehide", disconnect);
+  window.addEventListener("beforeunload", disconnect);
+}
+
+// ===== Menu inicial (roteamento Solo / Multijogador) =====
+// O jogo abre com o menu na frente (mundo solo pausado atrás). Escolher
+// "Solo" destrava o motor solo (sem WebSocket, sem API — 100% offline);
+// escolher "Multijogador" instancia o client WebSocket (startMultiplayer) e o
+// servidor assume via setServerDriven.
+solo.pause(); // mundo congela atrás do overlay do menu
+const menu = createMenu({
+  onSelect: (choice) => {
+    menu.hide();
+    solo.resume();
+    if (choice === "multiplayer") {
+      startMultiplayer();
     }
   },
 });
 
-// Desconecta o WebSocket ao sair/recarregar a página (net lifecycle): fecha o
-// socket e interrompe o loop de reconexão — sem vazamento nem tentativas
-// infinitas em segundo plano. pagehide cobre mobile (browser pode não
-// disparar beforeunload de forma confiável).
-window.addEventListener("pagehide", () => server.disconnect());
-window.addEventListener("beforeunload", () => server.disconnect());
+// Guarda de HUD: o id do jogador local (multiplayer) ou "local" (solo).
+function localPlayerId(): string {
+  return server?.myId() || "local";
+}
+
+// ===== Loop de input MULTIPLAYER (servidor autoritativo) =====
+// Offline quem consome o input é o motor solo (startSolo — o loop dele
+// retorna cedo quando serverDriven). Aqui o loop só assume quando o servidor
+// já tomou conta do mundo (primeiro broadcast de moedas — serverCoins): os
+// guards são mutuamente exclusivos, então input.poll() nunca é consumido
+// duas vezes no mesmo frame. Movimento e pulo são client-side (o net.ts
+// envia a posição ~10x/s via sendState); o tiro é INTENÇÃO — o servidor
+// valida o cooldown (fire_rate da loja) e cria o projétil autoritativo
+// (sendShoot). O visual do tiro local espelha o tiro triplo do broadcast de
+// efeitos (powerUpEffects) — mesmo padrão do main.ts pré-solo.
+let mpWasGrounded = true;
+onUpdate(() => {
+  if (!serverCoins || !server) return;
+
+  const frame = input.poll();
+  if (!shopOpen() && player.exists()) {
+    player.movePlayer(frame.direction);
+    if (frame.jumpPressed) {
+      if (player.isGrounded()) {
+        playJump();
+        particles.spawnDust(player.pos.x, player.pos.y + 20, 90);
+      }
+      player.jumpPlayer();
+    }
+    if (frame.shootPressed) {
+      playShoot();
+      particles.spawnShootImpact(player.pos.x + player.facing * 24, player.pos.y - 10);
+      if ((powerUpEffects[server.myId()]?.tripleShot ?? 0) > 0) {
+        player.shootTriple();
+      } else {
+        player.shoot();
+      }
+      // Servidor autoritativo: valida o cooldown (fire_rate) e cria o projétil
+      // que causa dano a inimigos/boss — o client só envia a intenção.
+      server.sendShoot();
+    }
+  }
+
+  const grounded = player.exists() && player.isGrounded();
+  if (grounded && !mpWasGrounded) {
+    particles.spawnDust(player.pos.x, player.pos.y + 20);
+  }
+  mpWasGrounded = grounded;
+});
+
+// Loja aberta (overlay DOM .shop-root)? Durante ela o mundo está pausado no
+// servidor — o input local é ignorado para o jogador não se mover atrás do
+// overlay (mesma guarda do main.ts antigo).
+function shopOpen(): boolean {
+  const el = document.querySelector<HTMLElement>(".shop-root");
+  return !!el && el.style.display !== "none";
+}
 
 // ===== Botões touch: visibilidade =====
 // O input adaptativo (teclado + touch) é criado acima e passado ao startSolo;
@@ -478,6 +564,10 @@ refreshTouchButtons();
   get enemies() {
     return k.get("enemy").map((e) => ({ x: e.pos.x, y: e.pos.y, hp: e.hp }));
   },
+  // DEBUG (temporário — smoke test e2e): power-ups da fase (posições/tipos).
+  get powerUps() {
+    return solo.getPowerUps().map((p) => ({ id: p.id, kind: p.kind, x: p.x, y: p.y }));
+  },
   get bullets() {
     return k.get("bullet").map((b) => ({ x: b.pos.x, y: b.pos.y, vel: b.vel }));
   },
@@ -530,11 +620,13 @@ function buildHudState(): HudState {
       localDeadSince = 0;
     }
     players.push({
-      id: server.myId() || "local",
+      id: localPlayerId(),
       name: "Você",
       color: "rgb(66, 200, 245)",
       hp: player.hp,
-      maxHp: playerMaxHp,
+      // Teto efetivo: no multiplayer vem do broadcast (upgrades max_hp da
+      // loja aplicados pelo servidor); offline do motor solo (run.stats).
+      maxHp: serverCoins ? playerMaxHp : solo.run.stats.maxHp,
       x: player.pos.x,
       y: player.pos.y,
       respawning: dead,
@@ -542,11 +634,11 @@ function buildHudState(): HudState {
       // Badge de moedas do jogador local (multiplayer): contador DA FASE
       // vindo do broadcast do servidor. Offline o contador é o do motor solo
       // (solo.run.teamCoins, canto superior direito) — sem badge aqui.
-      coins: serverCoins ? (coinCounts[server.myId()] ?? 0) : undefined,
+      coins: serverCoins ? (coinCounts[localPlayerId()] ?? 0) : undefined,
       // Efeitos ativos de power-up: badges do HUD (❤️+25 / 🔱10s / 🛡️) + HP
       // acima do teto. Online é espelho do broadcast; offline o motor solo
       // decide (power-ups determinísticos da fase).
-      effects: serverCoins ? powerUpEffects[server.myId()] : solo.getEffects(),
+      effects: serverCoins ? powerUpEffects[localPlayerId()] : solo.getEffects(),
     });
   }
   for (const np of netPlayers) {
@@ -588,12 +680,12 @@ function buildHudState(): HudState {
 
   return {
     players,
-    localPlayerId: server.myId() || "local",
+    localPlayerId: localPlayerId(),
     camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
     // Multiplayer: total exibido = contador DA FASE do jogador local
     // (servidor é autoritativo; não existe carteira de time). Offline: o
     // contador local do singleplayer (solo.run.teamCoins).
-    teamCoins: serverCoins ? (coinCounts[server.myId()] ?? 0) : solo.run.teamCoins,
+    teamCoins: serverCoins ? (coinCounts[localPlayerId()] ?? 0) : solo.run.teamCoins,
     // Sem servidor (singleplayer local offline), a fase exibida é a local
     // (solo.run.phase) — o broadcast da run é quem manda no multiplayer.
     phase: phaseState ? `Fase ${phaseState.number}` : `Fase ${solo.run.phase}`,
@@ -613,7 +705,7 @@ onUpdate(() => {
   // estiver ativo no broadcast de efeitos — some sozinha quando o servidor
   // consome a carga. Offline a bolha espelha a carga do efeito do motor solo
   // (solo.getEffects().shield) e some quando damagePlayer a consome.
-  const effects = serverCoins ? powerUpEffects[server.myId()] : solo.getEffects();
+  const effects = serverCoins ? powerUpEffects[localPlayerId()] : solo.getEffects();
   const shieldActive = (effects?.shield ?? 0) > 0;
   shieldBubble.hidden = !shieldActive;
   if (shieldActive && player.exists()) {

@@ -14,9 +14,11 @@ export interface PlayerObject extends GameObj {
   hp: number;
   speed: number;
   facing: number; // 1 = direita, -1 = esquerda
-  // move(dir) é o atalho do player; move(x, y) delega para o GameObj.
-  move(dir: number, dy?: number): void;
-  jump(force?: number): void;
+  // moveBy(dir) é o atalho do player; move(x, y) delega para o GameObj.
+  // (nome "moveBy" para não colidir com o componente `pos` do kaplay,
+  // que já define move(x, y); idem doJump vs `body().jump`.)
+  moveBy(dir: number): void;
+  doJump(force?: number): void;
   shoot(): void;
   takeDamage(n: number): void;
   isGrounded(): boolean;
@@ -31,8 +33,8 @@ interface PlayerBehavior {
   hp: number;
   speed: number;
   facing: number;
-  move(this: PlayerObject, dir: number, dy?: number): void;
-  jump(this: PlayerObject, force?: number): void;
+  moveBy(this: PlayerObject, dir: number): void;
+  doJump(this: PlayerObject, force?: number): void;
   shoot(this: PlayerObject): void;
   takeDamage(this: PlayerObject, n: number): void;
 }
@@ -44,12 +46,12 @@ export function createPlayer(k: KAPLAYCtx, opts: PlayerOpts): PlayerObject {
     hp: opts.maxHp,
     speed: 320,
     facing: 1, // 1 = direita, -1 = esquerda
-    move(dir: number) {
+    moveBy(dir: number) {
       if (dir !== 0) this.facing = dir;
       this.move(dir * this.speed, 0);
     },
-    jump() {
-      if (this.isGrounded()) this.jump(520);
+    doJump(force?: number) {
+      if (this.isGrounded()) this.jump(force ?? 520);
     },
     shoot() {
       const b = add([

@@ -26,3 +26,4 @@ apps/api/bin/
 # Logs
 *.log
 npm-debug.log*
+.vercel

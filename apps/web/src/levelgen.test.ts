@@ -7,6 +7,7 @@ import {
   GapWidth,
   MinSpecHeight,
   MinSpecWidth,
+  POWERUP_MAX_PER_PHASE,
   PLAYER_WIDTH,
   PlayerSpawnX,
   TILE,
@@ -602,6 +603,87 @@ describe("generateLevelData — moedas presentes em toda fase", () => {
             ).toBe(0);
           }
         }
+      }
+    }
+  });
+});
+
+// ===== Power-ups: paridade com o servidor Go (level.go passo 6) =====
+
+describe("generateLevelData — powerUpSpawns paridade com o servidor Go", () => {
+  // Golden capturados do servidor Go (GenerateLevel, 120x12) via teste
+  // temporário zz_dump_powerup_test.go: mesmas posições (tile) e TIPOS.
+  const goldens: Array<{ seed: number; want: string }> = [
+    { seed: 0, want: "count=1 [42,6,tiro_triplo]" },
+    { seed: 1, want: "count=2 [29,6,tiro_triplo] [112,6,escudo]" },
+    { seed: 2, want: "count=1 [63,8,escudo]" },
+    { seed: 42, want: "count=3 [79,6,tiro_triplo] [79,8,vida] [80,6,escudo]" },
+    { seed: 123456789, want: "count=2 [8,8,vida] [106,7,escudo]" },
+    { seed: 4294967295, want: "count=2 [43,6,vida] [81,7,escudo]" },
+  ];
+
+  it.each(goldens)("seed $seed produz os MESMOS power-ups que o servidor Go", ({ seed, want }) => {
+    const d = generateLevelData({ width: 120, height: 12, seed });
+    const got =
+      `count=${d.powerUpSpawns.length}` +
+      d.powerUpSpawns.map((p) => ` [${p.x},${p.y},${p.kind}]`).join("");
+    expect(got).toBe(want);
+  });
+
+  it("limite: no máximo POWERUP_MAX_PER_PHASE por fase", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const d = generateLevelData(specOf(s, seed));
+        expect(d.powerUpSpawns.length, `${s.name} seed ${seed}`).toBeLessThanOrEqual(
+          POWERUP_MAX_PER_PHASE
+        );
+        expect(d.powerUpSpawns.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("no máximo UM de cada tipo por fase", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const d = generateLevelData(specOf(s, seed));
+        const kinds = d.powerUpSpawns.map((p) => p.kind);
+        expect(new Set(kinds).size, `${s.name} seed ${seed}`).toBe(kinds.length);
+      }
+    }
+  });
+
+  it("nunca enterrado: sempre em topo exposto (ou chão no fallback)", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const ctx = `${s.name} seed ${seed}`;
+        const spec = specOf(s, seed);
+        const d = generateLevelData(spec);
+        const groundY = spec.height - 2;
+        const solid = new Set(d.tiles.map((t) => `${t.x},${t.y}`));
+        const has = (x: number, y: number) => solid.has(`${x},${y}`);
+        const hasPlatform = d.tiles.some((t) => t.y < groundY);
+        for (const p of d.powerUpSpawns) {
+          // Acima do chão: topo exposto (nada sólido em cima).
+          if (p.y < groundY) {
+            expect(has(p.x, p.y), `${ctx} power-up sem tile sólido`).toBe(true);
+            expect(has(p.x, p.y - 1), `${ctx} power-up ${p.x},${p.y} enterrado`).toBe(false);
+          } else if (!hasPlatform) {
+            // Fallback: chão sólido com nada em cima.
+            expect(p.y, `${ctx} fallback deve usar o chão`).toBe(groundY);
+            expect(has(p.x, p.y), `${ctx} fallback sem tile sólido`).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  it("determinístico: mesma seed ⇒ exatamente os mesmos power-ups", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const spec = specOf(s, seed);
+        const a = generateLevelData(spec).powerUpSpawns;
+        const b = generateLevelData(spec).powerUpSpawns;
+        expect(b).toEqual(a);
       }
     }
   });

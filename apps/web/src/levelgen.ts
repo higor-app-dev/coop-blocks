@@ -33,6 +33,13 @@ export interface Tile {
   y: number; // fileira (tile; y cresce para baixo)
 }
 
+/** Power-up da fase: posição em coordenadas de tile + tipo. */
+export interface PowerUpSpawn {
+  x: number;
+  y: number;
+  kind: "vida" | "tiro_triplo" | "escudo";
+}
+
 export interface LevelData {
   tiles: Tile[]; // tiles "solid" (coordenadas de tile, ordenados, sem duplicatas)
   playerSpawn: { x: number; y: number }; // pixels
@@ -44,6 +51,14 @@ export interface LevelData {
    * tile→pixels fica na camada de moedas (coins.ts, levelCoin).
    */
   coinSpawns: Tile[];
+  /**
+   * Power-ups da fase (raros — no máximo PowerUpMaxPerPhase, no máximo um de
+   * cada tipo, variação seed-dependente) em coordenadas de tile + tipo —
+   * espelho do Level.PowerUpSpawns do servidor Go (level.go, passo 6). A
+   * conversão tile→pixels fica na camada de power-ups (powerups.ts,
+   * levelPowerUp).
+   */
+  powerUpSpawns: PowerUpSpawn[];
   render(): void;
 }
 
@@ -63,6 +78,13 @@ export const CoinColumnStep = 4; // moedas a cada N colunas (tx % 4 === 0)
 // plataformas) — NÃO altera a ordem de consumo do layout (mesma constante
 // 0x9E3779B9 do servidor Go em level.go passo 5).
 export const CoinSeedXor = 0x9e3779b9;
+// XOR aplicado à seed para a stream própria dos POWER-UPS (sorteio das
+// posições/tipos) — mesma constante 0x85EBCA6B do servidor Go em level.go
+// passo 6.
+export const PowerUpSeedXor = 0x85ebca6b;
+// Teto de power-ups por fase (raridade em quantidade — 1 a 3 por fase contra
+// ~30 moedas). Espelho do PowerUpMaxPerPhase do servidor (powerups.go).
+export const POWERUP_MAX_PER_PHASE = 3;
 
 // Largura do hitbox do jogador em pixels — mesma do servidor
 // (apps/api/internal/game/player.go: PlayerWidth = 28.0).
@@ -136,6 +158,7 @@ export function generateLevelData(spec: LevelSpec): {
   playerSpawn: { x: number; y: number };
   enemySpawns: Array<{ x: number; y: number }>;
   coinSpawns: Tile[];
+  powerUpSpawns: PowerUpSpawn[];
 } {
   validateSpec(spec);
 
@@ -237,9 +260,62 @@ export function generateLevelData(spec: LevelSpec): {
   }
   coinSpawns.sort((a, b) => a.x - b.x || a.y - b.y);
 
+  // 6) Power-ups: RAROS e LIMITADOS — no máximo POWERUP_MAX_PER_PHASE por
+  //    fase (1 a 3), no máximo UM de cada tipo (conjunto variado), com
+  //    posições seed-dependentes — espelho fiel do servidor Go (Level.
+  //    PowerUpSpawns, level.go passo 6). Candidatos: topos expostos de
+  //    plataforma (qualquer coluna); se a fase não tem plataformas, o chão
+  //    sólido (fallback — garante presença em toda fase). O sorteio usa
+  //    stream própria da seed (mulberry32(seed ^ PowerUpSeedXor), mesma
+  //    0x85EBCA6B do Go — não altera a ordem de consumo do layout/moedas):
+  //    embaralhamento Fisher-Yates dos candidatos, contagem e rotação dos
+  //    tipos. Determinístico: mesma seed → mesmos power-ups (tiles E tipos).
+  const powerUpSpawns: PowerUpSpawn[] = [];
+  const powerRnd = mulberry32(spec.seed ^ PowerUpSeedXor);
+
+  const cands: Tile[] = [];
+  for (const t of tiles) {
+    if (t.y >= groundY || hasTile(t.x, t.y - 1)) {
+      continue; // chão/enterrados não são candidatos (topo exposto acima do chão)
+    }
+    cands.push(t);
+  }
+  if (cands.length === 0) {
+    // Fallback: fases sem plataformas usam o chão sólido.
+    for (let tx = 0; tx < spec.width; tx++) {
+      if (hasTile(tx, groundY)) {
+        cands.push({ x: tx, y: groundY });
+      }
+    }
+  }
+  // Entrada do embaralhamento já ordenada (tiles é canônico — (x, y)).
+  // Fisher-Yates com a stream da seed: posições variam de fase para fase.
+  for (let i = cands.length - 1; i > 0; i--) {
+    const j = Math.floor(powerRnd() * (i + 1));
+    const tmp = cands[i];
+    cands[i] = cands[j];
+    cands[j] = tmp;
+  }
+  let count = 1 + Math.floor(powerRnd() * POWERUP_MAX_PER_PHASE);
+  if (count > cands.length) {
+    count = cands.length;
+  }
+  // Tipos: rotação da seed sobre [vida, tiro_triplo, escudo] — no máximo
+  // um de cada por fase.
+  const rot = Math.floor(powerRnd() * 3);
+  const kinds: PowerUpSpawn["kind"][] = ["vida", "tiro_triplo", "escudo"];
+  for (let i = 0; i < count; i++) {
+    powerUpSpawns.push({
+      x: cands[i].x,
+      y: cands[i].y,
+      kind: kinds[(i + rot) % kinds.length],
+    });
+  }
+  powerUpSpawns.sort((a, b) => a.x - b.x || a.y - b.y || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0));
+
   const playerSpawn = { x: PlayerSpawnX * TILE, y: groundY * TILE - 42 };
 
-  return { tiles, playerSpawn, enemySpawns, coinSpawns };
+  return { tiles, playerSpawn, enemySpawns, coinSpawns, powerUpSpawns };
 }
 
 /**
@@ -249,13 +325,14 @@ export function generateLevelData(spec: LevelSpec): {
  */
 export function generateLevel(k: KAPLAYCtx, spec: LevelSpec): LevelData {
   const { add, pos, rect, color, area, body, z } = k;
-  const { tiles, playerSpawn, enemySpawns, coinSpawns } = generateLevelData(spec);
+  const { tiles, playerSpawn, enemySpawns, coinSpawns, powerUpSpawns } = generateLevelData(spec);
 
   return {
     tiles,
     playerSpawn,
     enemySpawns,
     coinSpawns,
+    powerUpSpawns,
     render() {
       for (const t of tiles) {
         add([

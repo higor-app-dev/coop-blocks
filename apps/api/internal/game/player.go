@@ -78,11 +78,14 @@ func (c PlayerConfig) withDefaults() PlayerConfig {
 
 // Input representa a intenção do jogador em um tick. Left/Right são estados
 // de tecla segurada; Jump é uma borda de subida (true apenas no tick em que o
-// jogador apertou pular).
+// jogador apertou pular); Shoot também é borda de subida — o cooldown de tiro
+// é do núcleo (World), então cada tick com Shoot=true dispara no máximo um
+// projétil se o cooldown permitir.
 type Input struct {
 	Left  bool
 	Right bool
 	Jump  bool
+	Shoot bool
 }
 
 // PlayerBody é o corpo físico simulado do jogador. Posição (X, Y) é o canto superior

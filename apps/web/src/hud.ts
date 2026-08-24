@@ -280,6 +280,146 @@ function renderPlayerRow(p: HudPlayer, localPlayerId: string): HTMLDivElement {
   return row;
 }
 
+// ===== Setas de direção (companheiros fora do viewport) =====
+//
+// Indicadores de borda: quando um companheiro está fora do viewport, uma seta
+// é desenhada na borda da tela, clampada na direção do alvo, com a cor e uma
+// abreviatura do nome do jogador. O cálculo é todo em coordenadas de mundo
+// (câmera + posição do player) e convertido para % da tela — o DOM posiciona
+// a seta com left/top % e a rotaciona com o ângulo da direção.
+
+/** Visão de uma seta de direção — derivada, pura e testável. */
+export interface HudArrow {
+  id: string;
+  name: string;
+  /** Abreviatura exibida na seta (iniciais do nome). */
+  abbr: string;
+  color: string;
+  /** Posição horizontal em % da tela (0–100). */
+  left: number;
+  /** Posição vertical em % da tela (0–100). */
+  top: number;
+  /** Ângulo da direção em graus (0 = apontando para a direita; CSS rotate). */
+  angleDeg: number;
+}
+
+/**
+ * true = o ponto está FORA do retângulo do viewport (câmera ± metade da
+ * dimensão). Ponto exatamente na borda conta como visível (não gera seta).
+ */
+export function isOffscreen(camera: HudCamera, x: number, y: number): boolean {
+  const halfW = camera.width / 2;
+  const halfH = camera.height / 2;
+  return (
+    x < camera.x - halfW ||
+    x > camera.x + halfW ||
+    y < camera.y - halfH ||
+    y > camera.y + halfH
+  );
+}
+
+/**
+ * Projeta o alvo na borda do viewport mantendo a direção (centro → alvo):
+ * retorna o ponto da borda mais próximo do alvo ao longo da linha que liga o
+ * centro da câmera ao alvo. Clamp por eixo: o lado que "estoura" primeiro
+ * (menor razão metade-dimensão/|delta|) define onde a seta encosta.
+ */
+export function clampArrowPoint(
+  camera: HudCamera,
+  x: number,
+  y: number
+): { x: number; y: number } {
+  const halfW = camera.width / 2;
+  const halfH = camera.height / 2;
+  const dx = x - camera.x;
+  const dy = y - camera.y;
+  const sx = dx !== 0 ? halfW / Math.abs(dx) : Infinity;
+  const sy = dy !== 0 ? halfH / Math.abs(dy) : Infinity;
+  const s = Math.min(sx, sy);
+  return { x: camera.x + dx * s, y: camera.y + dy * s };
+}
+
+/**
+ * Visão de seta para um alvo: posição % na tela (borda clampada) e ângulo em
+ * graus da direção centro→alvo. Retorna null quando o alvo está visível.
+ */
+export function arrowView(
+  camera: HudCamera,
+  x: number,
+  y: number
+): { left: number; top: number; angleDeg: number } | null {
+  if (!isOffscreen(camera, x, y)) return null;
+  const p = clampArrowPoint(camera, x, y);
+  const halfW = camera.width / 2;
+  const halfH = camera.height / 2;
+  const left = ((p.x - (camera.x - halfW)) / camera.width) * 100;
+  const top = ((p.y - (camera.y - halfH)) / camera.height) * 100;
+  const angleDeg = (Math.atan2(p.y - camera.y, p.x - camera.x) * 180) / Math.PI;
+  return { left, top, angleDeg };
+}
+
+/**
+ * Abreviatura exibida na seta: iniciais das palavras do nome (até 2), ou as
+ * 2 primeiras letras quando nome simples. Vazio → "?" (sem nome conhecido).
+ */
+export function playerAbbr(name: string): string {
+  const clean = (name ?? "").trim();
+  if (!clean) return "?";
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return words
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join("")
+      .toUpperCase();
+  }
+  return clean.slice(0, 2).toUpperCase();
+}
+
+/** Deriva todas as setas do estado: companheiros (não locais) fora do viewport. */
+export function hudArrows(state: HudState): HudArrow[] {
+  const arrows: HudArrow[] = [];
+  for (const p of state.players) {
+    if (p.id === state.localPlayerId) continue;
+    const view = arrowView(state.camera, p.x, p.y);
+    if (!view) continue;
+    arrows.push({
+      id: p.id,
+      name: p.name,
+      abbr: playerAbbr(p.name),
+      color: p.color,
+      left: view.left,
+      top: view.top,
+      angleDeg: view.angleDeg,
+    });
+  }
+  return arrows;
+}
+
+/** Constrói o elemento DOM de uma seta (posição %, rotação e rótulo). */
+function renderArrow(a: HudArrow): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "hud-arrow";
+  el.setAttribute("data-player-id", a.id);
+  el.title = a.name;
+  el.style.left = `${a.left}%`;
+  el.style.top = `${a.top}%`;
+  el.style.color = a.color;
+
+  // Ícone ▶ rotacionado para a direção do alvo (0° = apontando à direita).
+  const icon = document.createElement("span");
+  icon.className = "hud-arrow-icon";
+  icon.textContent = "▶";
+  icon.style.transform = `rotate(${a.angleDeg}deg)`;
+
+  const label = document.createElement("span");
+  label.className = "hud-arrow-label";
+  label.textContent = a.abbr;
+
+  el.append(icon, label);
+  return el;
+}
+
 // ===== Overlay DOM =====
 
 const SECTION_ATTR = "data-hud";
@@ -375,8 +515,10 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
       ...state.players.map((p) => renderPlayerRow(p, state.localPlayerId))
     );
 
-    // Seções de setas (arrows) ficam vazias até o subtask de setas
-    // implementar o render em cima do mesmo state.
+    // Camada de setas: uma seta por companheiro fora do viewport, na borda
+    // da tela, apontando para ele (cor + abreviatura do nome). Some quando o
+    // companheiro entra no viewport (arrowView retorna null).
+    arrowsEl.replaceChildren(...hudArrows(state).map(renderArrow));
   }
 
   function destroy(): void {

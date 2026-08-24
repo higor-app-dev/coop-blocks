@@ -152,6 +152,30 @@
         background: none;
         padding: 0;
       }
+      /* Seta de companheiro fora do viewport: posicionada na borda (left/top
+         % definidos inline), ícone ▶ rotacionado para a direção do alvo e
+         abreviatura do nome na cor do jogador. */
+      .hud-root .hud-arrow {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.55);
+        white-space: nowrap;
+      }
+      .hud-root .hud-arrow-icon {
+        display: inline-block;
+        font-size: 12px;
+        line-height: 1;
+      }
+      .hud-root .hud-arrow-label {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+      }
       /* Botão de mute — canto superior direito, abaixo das moedas.
          O overlay raiz tem pointer-events: none; o botão reabilita para ser
          clicável por cima do canvas. */

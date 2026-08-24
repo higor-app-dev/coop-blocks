@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MUTE_STORAGE_KEY,
+  arrowView,
+  clampArrowPoint,
   clampHp,
   createHud,
   formatCoins,
@@ -8,7 +10,10 @@ import {
   formatHud,
   formatRespawnLabel,
   hpPercent,
+  hudArrows,
+  isOffscreen,
   loadMutedSession,
+  playerAbbr,
   playerRowView,
   saveMutedSession,
   type HudPlayer,
@@ -537,6 +542,129 @@ describe("createHud — contador de moedas", () => {
     );
     const panel = byAttr(doc.body, "data-hud", "players")!;
     expect(byClass(panel, "player-coins")).toHaveLength(0);
+  });
+});
+
+// ===== Setas de direção (companheiros fora do viewport) =====
+
+describe("setas — helpers puros", () => {
+  const cam = { x: 0, y: 0, width: 960, height: 540 };
+
+  it("isOffscreen: dentro do viewport → false", () => {
+    expect(isOffscreen(cam, 0, 0)).toBe(false);
+    expect(isOffscreen(cam, 479, 269)).toBe(false);
+    expect(isOffscreen(cam, -479, -269)).toBe(false);
+  });
+
+  it("isOffscreen: fora por qualquer lado → true", () => {
+    expect(isOffscreen(cam, 481, 0)).toBe(true);
+    expect(isOffscreen(cam, -481, 0)).toBe(true);
+    expect(isOffscreen(cam, 0, 271)).toBe(true);
+    expect(isOffscreen(cam, 0, -271)).toBe(true);
+  });
+
+  it("clampArrowPoint: alvo à direita → ponto na borda direita, mesma altura", () => {
+    const p = clampArrowPoint(cam, 2000, 0);
+    expect(p.x).toBe(480);
+    expect(p.y).toBe(0);
+  });
+
+  it("clampArrowPoint: alvo à esquerda → ponto na borda esquerda", () => {
+    const p = clampArrowPoint(cam, -2000, 0);
+    expect(p.x).toBe(-480);
+    expect(p.y).toBe(0);
+  });
+
+  it("clampArrowPoint: alvo abaixo → ponto na borda inferior", () => {
+    const p = clampArrowPoint(cam, 0, 2000);
+    expect(p.x).toBe(0);
+    expect(p.y).toBe(270);
+  });
+
+  it("clampArrowPoint: diagonal preserva a direção (clampa no lado mais próximo)", () => {
+    // 45° com |dx|=|dy|: halfW(480) > halfH(270) → clampa em y=270 e x=270.
+    const p = clampArrowPoint(cam, 1000, 1000);
+    expect(p.y).toBe(270);
+    expect(p.x).toBeCloseTo(270, 5);
+  });
+
+  it("arrowView: null para alvo dentro do viewport", () => {
+    expect(arrowView(cam, 100, 50)).toBeNull();
+  });
+
+  it("arrowView: posição em % da tela para alvo à direita", () => {
+    const v = arrowView(cam, 2000, 0)!;
+    expect(v.left).toBe(100);
+    expect(v.top).toBe(50);
+    expect(v.angleDeg).toBe(0);
+  });
+
+  it("arrowView: ângulo aponta para baixo (90°) e topo 100%", () => {
+    const v = arrowView(cam, 0, 2000)!;
+    expect(v.angleDeg).toBe(90);
+    expect(v.top).toBe(100);
+  });
+
+  it("arrowView: ângulo para cima (-90°) e topo 0%", () => {
+    const v = arrowView(cam, 0, -2000)!;
+    expect(v.angleDeg).toBe(-90);
+    expect(v.top).toBe(0);
+  });
+
+  it("playerAbbr: iniciais de nomes compostos / 2 primeiras letras / fallback", () => {
+    expect(playerAbbr("Maria Silva")).toBe("MS");
+    expect(playerAbbr("Jogador")).toBe("JO");
+    expect(playerAbbr("")).toBe("?");
+  });
+
+  it("hudArrows: ignora o jogador local e quem está no viewport", () => {
+    const arrows = hudArrows(
+      hudState([
+        player({ id: "p1", x: 0, y: 0 }), // local, dentro
+        player({ id: "p2", x: 2000, y: 0 }), // remoto, fora
+        player({ id: "p3", x: 100, y: 50 }), // remoto, dentro
+      ])
+    );
+    expect(arrows.map((a) => a.id)).toEqual(["p2"]);
+  });
+});
+
+describe("createHud — setas de direção", () => {
+  it("renderiza seta para companheiro fora do viewport com cor e abreviatura", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudState([
+        player({ id: "p1", x: 0, y: 0 }),
+        player({ id: "p2", name: "Maria Silva", color: "rgb(255, 0, 0)", x: 2000, y: 0 }),
+      ])
+    );
+    const layer = byAttr(doc.body, "data-hud", "arrows")!;
+    const arrows = byClass(layer, "hud-arrow");
+    expect(arrows).toHaveLength(1);
+    expect(arrows[0].attrs["data-player-id"]).toBe("p2");
+    expect(arrows[0].style.left).toBe("100%");
+    expect(arrows[0].style.color).toBe("rgb(255, 0, 0)");
+    const label = byClass(arrows[0], "hud-arrow-label")[0];
+    expect(label.textContent).toBe("MS");
+  });
+
+  it("some quando o companheiro entra no viewport", () => {
+    const { update } = createHud({ root: doc.body });
+    const far = player({ id: "p2", x: 2000, y: 0 });
+    update(hudState([player({ id: "p1", x: 0, y: 0 }), far]));
+    const layer = byAttr(doc.body, "data-hud", "arrows")!;
+    expect(byClass(layer, "hud-arrow")).toHaveLength(1);
+    update(hudState([player({ id: "p1", x: 0, y: 0 }), { ...far, x: 100, y: 50 }]));
+    expect(byClass(layer, "hud-arrow")).toHaveLength(0);
+  });
+
+  it("camada vazia sem companheiros fora do viewport", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudState([player({ id: "p1", x: 0, y: 0 }), player({ id: "p2", x: 100, y: 50 })])
+    );
+    const layer = byAttr(doc.body, "data-hud", "arrows")!;
+    expect(layer.children).toHaveLength(0);
   });
 });
 

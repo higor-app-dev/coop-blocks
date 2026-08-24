@@ -110,8 +110,8 @@ for (const key of ACTION_KEYS) {
   const bind = HOLD_KEYS.has(key) ? onKeyDown : onKeyPress;
   bind(key, () => {
     const action = keyToAction(key);
-    if (action?.type === "move") player.moveBy(action.dir);
-    else if (action?.type === "jump") player.doJump();
+    if (action?.type === "move") player.movePlayer(action.dir);
+    else if (action?.type === "jump") player.jumpPlayer();
     else if (action?.type === "shoot") player.shoot();
   });
 }

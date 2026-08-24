@@ -14,11 +14,11 @@ export interface PlayerObject extends GameObj {
   hp: number;
   speed: number;
   facing: number; // 1 = direita, -1 = esquerda
-  // moveBy(dir) é o atalho do player; move(x, y) delega para o GameObj.
-  // (nome "moveBy" para não colidir com o componente `pos` do kaplay,
-  // que já define move(x, y); idem doJump vs `body().jump`.)
-  moveBy(dir: number): void;
-  doJump(force?: number): void;
+  // movePlayer(dir) é o atalho do player; move(x, y) delega para o GameObj.
+  // (Nomes sem colisão: o componente `pos` do kaplay já define move/moveBy/moveTo;
+  // idem jump vs body().jump.)
+  movePlayer(dir: number): void;
+  jumpPlayer(force?: number): void;
   shoot(): void;
   takeDamage(n: number): void;
   isGrounded(): boolean;
@@ -33,8 +33,8 @@ interface PlayerBehavior {
   hp: number;
   speed: number;
   facing: number;
-  moveBy(this: PlayerObject, dir: number): void;
-  doJump(this: PlayerObject, force?: number): void;
+  movePlayer(this: PlayerObject, dir: number): void;
+  jumpPlayer(this: PlayerObject, force?: number): void;
   shoot(this: PlayerObject): void;
   takeDamage(this: PlayerObject, n: number): void;
 }
@@ -46,11 +46,11 @@ export function createPlayer(k: KAPLAYCtx, opts: PlayerOpts): PlayerObject {
     hp: opts.maxHp,
     speed: 320,
     facing: 1, // 1 = direita, -1 = esquerda
-    moveBy(dir: number) {
+    movePlayer(dir: number) {
       if (dir !== 0) this.facing = dir;
       this.move(dir * this.speed, 0);
     },
-    doJump(force?: number) {
+    jumpPlayer(force?: number) {
       if (this.isGrounded()) this.jump(force ?? 520);
     },
     shoot() {

@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { clampHp, formatDeathMessage, formatHud } from "./hud";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  MUTE_STORAGE_KEY,
+  clampHp,
+  formatDeathMessage,
+  formatHud,
+  loadMutedSession,
+  saveMutedSession,
+} from "./hud";
 
 describe("clampHp", () => {
   it("mantém valores dentro da faixa", () => {
@@ -57,7 +64,54 @@ describe("formatHud", () => {
 describe("formatDeathMessage", () => {
   it("retorna a mensagem de morte", () => {
     expect(formatDeathMessage()).toBe(
-      "💀 Você morreu! Recarregue a página para reiniciar."
+      "💀 Você morreu! Voltando em instantes..."
     );
+  });
+});
+
+describe("persistência do mute (sessão)", () => {
+  // Stub de sessionStorage em memória (node não tem sessionStorage).
+  const storage = new Map<string, string>();
+  const original = globalThis.sessionStorage;
+
+  beforeEach(() => {
+    storage.clear();
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => storage.get(k) ?? null,
+        setItem: (k: string, v: string) => void storage.set(k, v),
+      },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      value: original,
+    });
+  });
+
+  it("usa a chave documentada", () => {
+    expect(MUTE_STORAGE_KEY).toBe("coop-blocks:muted");
+  });
+
+  it("retorna fallback quando nada foi persistido", () => {
+    expect(loadMutedSession()).toBe(false);
+    expect(loadMutedSession(true)).toBe(true);
+  });
+
+  it("persiste e lê de volta o estado de mute", () => {
+    saveMutedSession(true);
+    expect(loadMutedSession()).toBe(true);
+    saveMutedSession(false);
+    expect(loadMutedSession()).toBe(false);
+  });
+
+  it("lê valores crus persistidos manualmente", () => {
+    storage.set(MUTE_STORAGE_KEY, "1");
+    expect(loadMutedSession()).toBe(true);
+    storage.set(MUTE_STORAGE_KEY, "0");
+    expect(loadMutedSession()).toBe(false);
   });
 });

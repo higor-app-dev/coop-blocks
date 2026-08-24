@@ -18,6 +18,7 @@
  *     div.hud-status  [data-hud="status"]   mensagem transitória (centro-topo)
  *     div.hud-players [data-hud="players"]  painel de HP dos jogadores (vazio até o subtask de placar)
  *     div.hud-arrows  [data-hud="arrows"]   camada de setas de direção (vazia até o subtask de setas)
+ *     button.hud-mute [data-hud="mute"]     mute de áudio (🔊/🔇, pointer-events: auto)
  */
 
 // ===== Contrato de estado =====
@@ -90,6 +91,39 @@ export interface Hud {
 export interface CreateHudOpts {
   /** Container onde o overlay será anexado (default: document.body). */
   root?: HTMLElement;
+  /** Estado inicial do mute (default: false). */
+  muted?: boolean;
+  /** Chamado quando o usuário alterna o mute (recebe o novo estado). */
+  onMuteToggle?: (muted: boolean) => void;
+}
+
+// ===== Persistência do mute (sessão) =====
+
+/** Chave no sessionStorage que guarda o estado de mute ("1" | "0"). */
+export const MUTE_STORAGE_KEY = "coop-blocks:muted";
+
+/**
+ * Lê o estado de mute persistido na sessão. Nunca lança: em ambientes sem
+ * sessionStorage (SSR/testes) retorna o fallback informado.
+ */
+export function loadMutedSession(fallback = false): boolean {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(MUTE_STORAGE_KEY);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Persiste o estado de mute na sessão. No-op silencioso sem sessionStorage. */
+export function saveMutedSession(muted: boolean): void {
+  try {
+    globalThis.sessionStorage?.setItem(MUTE_STORAGE_KEY, muted ? "1" : "0");
+  } catch {
+    // sem storage — mute vale só para esta sessão de execução
+  }
 }
 
 // ===== Helpers puros (testáveis) =====
@@ -108,9 +142,9 @@ export function formatHud(hp: number, maxHp: number, netCount: number): string {
   return `🧱 coop-blocks — HP ${shown}/${maxHp} — jogadores online: ${netCount}`;
 }
 
-/** Mensagem exibida quando o jogador local morre. */
+/** Mensagem exibida quando o jogador local morre (respawn automático em ~3s). */
 export function formatDeathMessage(): string {
-  return "💀 Você morreu! Recarregue a página para reiniciar.";
+  return "💀 Você morreu! Voltando em instantes...";
 }
 
 // ===== Overlay DOM =====
@@ -143,7 +177,28 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
   const playersEl = section("hud-players", "players");
   const arrowsEl = section("hud-arrows", "arrows");
 
-  el.append(phaseEl, coinsEl, statusEl, playersEl, arrowsEl);
+  // Botão de mute: estado visual sincronizado, clique chama onMuteToggle.
+  // O overlay raiz tem pointer-events: none (para não bloquear o jogo); o
+  // botão reabilita pointer-events via classe CSS .hud-mute.
+  let muted = opts.muted ?? false;
+  const muteBtn = document.createElement("button");
+  muteBtn.className = "hud-mute";
+  muteBtn.type = "button";
+  muteBtn.setAttribute(SECTION_ATTR, "mute");
+  muteBtn.setAttribute("aria-pressed", String(muted));
+  muteBtn.setAttribute("aria-label", muted ? "Ativar som" : "Silenciar");
+  muteBtn.title = muted ? "Ativar som" : "Silenciar";
+  muteBtn.textContent = muted ? "🔇" : "🔊";
+  muteBtn.addEventListener("click", () => {
+    muted = !muted;
+    muteBtn.textContent = muted ? "🔇" : "🔊";
+    muteBtn.setAttribute("aria-pressed", String(muted));
+    muteBtn.setAttribute("aria-label", muted ? "Ativar som" : "Silenciar");
+    muteBtn.title = muted ? "Ativar som" : "Silenciar";
+    opts.onMuteToggle?.(muted);
+  });
+
+  el.append(phaseEl, coinsEl, statusEl, playersEl, arrowsEl, muteBtn);
   root.appendChild(el);
 
   function update(state: HudState): void {
@@ -151,12 +206,10 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
     const phaseText = [state.phase, state.map]
       .filter((v) => v !== undefined && v !== "")
       .join(" — ");
-    let anyVisible = false;
 
     if (phaseText) {
       phaseEl.textContent = `📍 ${phaseText}`;
       phaseEl.style.display = "";
-      anyVisible = true;
     } else {
       phaseEl.style.display = "none";
     }
@@ -165,7 +218,6 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
     if (state.teamCoins !== undefined) {
       coinsEl.textContent = `🪙 ${state.teamCoins}`;
       coinsEl.style.display = "";
-      anyVisible = true;
     } else {
       coinsEl.style.display = "none";
     }
@@ -174,14 +226,13 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
     if (state.status) {
       statusEl.textContent = state.status;
       statusEl.style.display = "";
-      anyVisible = true;
     } else {
       statusEl.style.display = "none";
     }
 
-    // Overlay vazio não deve ser anunciado por leitores de tela; com conteúdo,
-    // o aria-hidden é removido para as seções ficarem acessíveis.
-    el.setAttribute("aria-hidden", anyVisible ? "false" : "true");
+    // O botão de mute está sempre presente e é interativo — o overlay nunca
+    // fica aria-hidden (seções vazias não são anunciadas, pois não têm texto).
+    el.setAttribute("aria-hidden", "false");
 
     // Seções de placar (players) e setas (arrows) ficam vazias até os
     // subtasks de feature implementarem o render em cima do mesmo state.

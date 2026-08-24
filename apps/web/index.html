@@ -88,6 +88,31 @@
         background: none;
         padding: 0;
       }
+      /* Botão de mute — canto superior direito, abaixo das moedas.
+         O overlay raiz tem pointer-events: none; o botão reabilita para ser
+         clicável por cima do canvas. */
+      .hud-root .hud-mute {
+        position: absolute;
+        top: max(44px, calc(env(safe-area-inset-top) + 36px));
+        right: max(8px, env(safe-area-inset-right));
+        padding: 6px 10px;
+        border: none;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        pointer-events: auto;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .hud-root .hud-mute:hover {
+        background: rgba(0, 0, 0, 0.75);
+      }
+      .hud-root .hud-mute:focus-visible {
+        outline: 2px solid rgba(255, 255, 255, 0.7);
+        outline-offset: 2px;
+      }
     </style>
   </head>
   <body>

@@ -85,6 +85,63 @@ describe("connectToServer — conexão", () => {
   });
 });
 
+// ===== Mensagens de power-ups (PowerUpsMsg / WorldMsg) =====
+
+describe("connectToServer — broadcast de power-ups", () => {
+  it("msg type=powerups entrega estado restante, remoções e efeitos por jogador", () => {
+    const onPowerUps = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPowerUps });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "powerups",
+        powerUps: [{ id: "p2", kind: "escudo", x: 300, y: 400, w: 20, h: 20 }],
+        removed: [{ id: "p1", kind: "vida", x: 100, y: 200 }],
+        effects: { alice: { vida: 25, tripleShot: 0, shield: 0 } },
+      }),
+    });
+    expect(onPowerUps).toHaveBeenCalledWith({
+      powerUps: [{ id: "p2", kind: "escudo", x: 300, y: 400, w: 20, h: 20 }],
+      removed: [{ id: "p1", kind: "vida", x: 100, y: 200 }],
+      effects: { alice: { vida: 25, tripleShot: 0, shield: 0 } },
+    });
+  });
+
+  it("msg type=powerups sem campos opcionais usa defaults seguros", () => {
+    const onPowerUps = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPowerUps });
+    captureWs([]).onmessage?.({ data: JSON.stringify({ type: "powerups" }) });
+    expect(onPowerUps).toHaveBeenCalledWith({ powerUps: [], removed: [], effects: {} });
+  });
+
+  it("WorldMsg (type=players) com powerUps+powerUpEffects entrega estado e efeitos", () => {
+    const onPowerUps = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPowerUps });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "players",
+        players: [{ id: "alice", x: 10, y: 20, hp: 125 }],
+        powerUps: [{ id: "p1", kind: "tiro_triplo", x: 100, y: 200, w: 20, h: 20 }],
+        powerUpEffects: { alice: { vida: 25, tripleShot: 180, shield: 0 } },
+      }),
+    });
+    // WorldMsg não carrega remoções — o estado completo cobre a reconciliação.
+    expect(onPowerUps).toHaveBeenCalledWith({
+      powerUps: [{ id: "p1", kind: "tiro_triplo", x: 100, y: 200, w: 20, h: 20 }],
+      removed: [],
+      effects: { alice: { vida: 25, tripleShot: 180, shield: 0 } },
+    });
+  });
+
+  it("WorldMsg sem powerUps não dispara onPowerUps (compatibilidade com versões antigas)", () => {
+    const onPowerUps = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPowerUps });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "players", players: [{ id: "alice", x: 10, y: 20, hp: 100 }] }),
+    });
+    expect(onPowerUps).not.toHaveBeenCalled();
+  });
+});
+
 // ===== Mensagens de fase da loja =====
 
 function captureWs(sent: string[]) {

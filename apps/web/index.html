@@ -88,7 +88,7 @@
          encolhe; nome, HP e moedas ficam fixos. */
       .hud-root .player-row {
         display: grid;
-        grid-template-columns: auto minmax(70px, 1fr) auto auto;
+        grid-template-columns: auto minmax(70px, 1fr) auto auto auto;
         align-items: center;
         gap: 6px;
         padding: 4px 8px;
@@ -127,11 +127,38 @@
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.15);
         overflow: hidden;
+        position: relative;
       }
       .hud-root .player-fill {
         height: 100%;
         border-radius: 999px;
         transition: width 0.15s linear;
+      }
+      /* Excedente de HP acima do teto (power-up VIDA — ex.: 125/100):
+         segmento verde sobreposto à direita da barra, saturando no teto. */
+      .hud-root .player-fill-over {
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 100%;
+        border-radius: 999px;
+        background: #4ade80;
+        box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+      }
+      /* Jogador com HP acima do teto: números em verde (bônus temporário). */
+      .hud-root .player-row.is-overmax .player-hp {
+        color: #7dff9b;
+        font-weight: 700;
+      }
+      /* Badges de efeitos ativos de power-up (❤️+25 / 🔱10s / 🛡️) — o
+         tempo restante do tiro triplo vem do broadcast do servidor. */
+      .hud-root .player-effects {
+        font-size: 11px;
+        font-weight: 600;
+        color: #9fe8ff;
+        text-align: right;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
       }
       /* Morto/aguardando respawn: barra e números somem, aparece a
          contagem regressiva (ou rótulo genérico de espera). */

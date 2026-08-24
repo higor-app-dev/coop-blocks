@@ -78,6 +78,7 @@ describe("createParticles — spawns", () => {
 
     p.spawnShootImpact(10, 20);
     p.spawnCoinCollect(30, 40);
+    p.spawnPowerUpCollect(35, 45);
     p.spawnEnemyDeath(50, 60);
     p.spawnRespawn(70, 80);
     p.spawnDust(90, 100);
@@ -85,6 +86,7 @@ describe("createParticles — spawns", () => {
     const total =
       DEFAULT_CONFIG.effects.shootImpact.count +
       DEFAULT_CONFIG.effects.coinCollect.count +
+      DEFAULT_CONFIG.effects.powerUpCollect.count +
       DEFAULT_CONFIG.effects.enemyDeath.count +
       DEFAULT_CONFIG.effects.respawn.count +
       DEFAULT_CONFIG.effects.dust.count;
@@ -98,6 +100,14 @@ describe("createParticles — spawns", () => {
         .slice(eff.shootImpact.count, eff.shootImpact.count + eff.coinCollect.count)
         .length
     ).toBe(eff.coinCollect.count);
+    expect(
+      created
+        .slice(
+          eff.shootImpact.count + eff.coinCollect.count,
+          eff.shootImpact.count + eff.coinCollect.count + eff.powerUpCollect.count
+        )
+        .length
+    ).toBe(eff.powerUpCollect.count);
     expect(engine.add).toHaveBeenCalledTimes(total);
   });
 

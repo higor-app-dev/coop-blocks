@@ -44,6 +44,27 @@ export interface HudPlayer {
   respawning?: boolean;
   /** Segundos restantes até o respawn (opcional). */
   respawnIn?: number;
+  /**
+   * Efeitos ativos de power-up do jogador (opcional — espelho do broadcast do
+   * servidor; só aparece quando o servidor manda). Nunca decididos pelo
+   * client: a presença/ausência reflete o estado autoritativo (o servidor
+   * limpa na morte e na expiração, e o HUD apenas espelha).
+   */
+  effects?: HudEffects;
+}
+
+/**
+ * Efeitos ativos de power-up de um jogador (PlayerPowerUpsState do servidor):
+ * - vida: HP ACIMA do teto concedido pelo VIDA (0 = sem efeito; ex.: 25 → o
+ *   jogador tem 125/100);
+ * - tripleShot: TICKS RESTANTES do tiro triplo (0 = inativo; convertido para
+ *   segundos com POWERUP_TICKS_PER_SECOND = 20 — 200 ticks = 10 s);
+ * - shield: cargas de escudo restantes (0/1 — absorve 1 hit e some).
+ */
+export interface HudEffects {
+  vida: number;
+  tripleShot: number;
+  shield: number;
 }
 
 /** Câmera/viewport em coordenadas de mundo. */
@@ -196,6 +217,60 @@ export function formatCoins(coins?: number): string {
   return `🪙 ${Math.max(0, Math.floor(coins))}`;
 }
 
+// ===== Efeitos de power-up no HUD =====
+//
+// Os efeitos ativos por jogador (power-up VIDA acima do teto, TIRO TRIPLO com
+// tempo restante e ESCUDO de 1 carga) são exibidos como badges na linha do
+// jogador. O estado é 100% espelho do broadcast do servidor (powerUpEffects):
+// o client NUNCA decide — quando o servidor limpa um efeito (expiração do
+// timer, morte, fim de fase), o próximo broadcast não o traz mais e o badge
+// some. O tiro triplo chega em TICKS do relógio do servidor e é convertido
+// para segundos (TicksPerSecond = 20) aqui, só para exibição.
+
+/** Ticks por segundo do relógio do servidor (game.TicksPerSecond). */
+export const POWERUP_TICKS_PER_SECOND = 20;
+
+/**
+ * Tempo restante do tiro triplo em segundos (arredondado para cima — nunca
+ * mostra "0s" enquanto o efeito está ativo). O valor chega em TICKS do
+ * servidor (ex.: 200 = 10 s exatos).
+ */
+export function formatEffectTime(ticks: number): string {
+  return `${Math.max(1, Math.ceil(ticks / POWERUP_TICKS_PER_SECOND))}s`;
+}
+
+/**
+ * Badges de efeitos ativos exibidos na linha do jogador, em ordem estável:
+ * vida → "❤️+25" (bônus acima do teto), tiro triplo → "🔱10s" (tempo
+ * restante) e escudo → "🛡️" (carga única). Sem efeitos (ou estado ausente)
+ * devolve lista vazia — o elemento nem é renderizado.
+ */
+export function effectLabels(effects?: HudEffects): string[] {
+  if (!effects) return [];
+  const out: string[] = [];
+  if ((effects.vida ?? 0) > 0) out.push(`❤️+${effects.vida}`);
+  if ((effects.tripleShot ?? 0) > 0) out.push(`🔱${formatEffectTime(effects.tripleShot)}`);
+  if ((effects.shield ?? 0) > 0) out.push("🛡️");
+  return out;
+}
+
+// ===== HP acima do teto (power-up VIDA — ex.: 125/100) =====
+//
+// O VIDA eleva o HP do jogador ACIMA do teto (100 → 125, temporário). O HUD
+// mostra o estado real: o número vai cru ("125/100", sem clamp superior), a
+// barra satura no teto e o EXCEDENTE ganha um segmento verde em destaque
+// (.player-fill-over) para o bônus não passar despercebido.
+
+/** true quando o HP do jogador está acima do teto (efeito VIDA ativo). */
+export function overMaxHp(hp: number, maxHp: number): boolean {
+  return hp > maxHp;
+}
+
+/** Excedente de HP acima do teto (0 quando dentro/abaixo — nunca negativo). */
+export function hpOverflow(hp: number, maxHp: number): number {
+  return Math.max(0, hp - maxHp);
+}
+
 // ===== Barra de HP do boss =====
 //
 // A seção [data-hud=boss] (topo, centro) aparece quando há um boss ativo na
@@ -294,11 +369,16 @@ export function isPlayerDown(p: HudPlayer): boolean {
 export interface PlayerRowView {
   name: string;
   color: string;
-  /** HP exibido (clampado em [0, maxHp]). */
+  /** HP exibido (clamp apenas inferior em 0 — NUNCA no teto: o power-up VIDA
+   *  eleva acima de maxHp e o estado real deve aparecer, ex.: 125/100). */
   hp: number;
   maxHp: number;
-  /** Percentual de preenchimento da barra (0–100). */
+  /** Percentual de preenchimento da barra (0–100, satura no teto). */
   percent: number;
+  /** true = HP acima do teto (efeito VIDA — destaque na linha). */
+  overMax: boolean;
+  /** Excedente de HP acima do teto (0 dentro/abaixo). */
+  overflow: number;
   /** true = morto/aguardando respawn (barra trocada pelo estado de espera). */
   down: boolean;
   /** true = jogador local (destacado na lista). */
@@ -307,6 +387,8 @@ export interface PlayerRowView {
   respawnLabel: string;
   /** Rótulo de moedas individuais (vazio quando o estado não fornece). */
   coinsLabel: string;
+  /** Badges de efeitos ativos de power-up (vazio = nenhum efeito). */
+  effectsLabels: string[];
 }
 
 /** Deriva a visão de exibição de um jogador a partir do estado bruto. */
@@ -315,13 +397,16 @@ export function playerRowView(p: HudPlayer, localPlayerId: string): PlayerRowVie
   return {
     name: p.name,
     color: p.color,
-    hp: clampHp(p.hp, p.maxHp),
+    hp: Math.max(0, p.hp), // sem clamp superior — HP acima do teto é estado real
     maxHp: p.maxHp,
     percent: hpPercent(p),
+    overMax: overMaxHp(p.hp, p.maxHp),
+    overflow: hpOverflow(p.hp, p.maxHp),
     down,
     local: p.id === localPlayerId,
     respawnLabel: down ? formatRespawnLabel(p.respawnIn) : "",
     coinsLabel: formatCoins(p.coins),
+    effectsLabels: effectLabels(p.effects),
   };
 }
 
@@ -350,9 +435,31 @@ function renderPlayerRow(p: HudPlayer, localPlayerId: string): HTMLDivElement {
   fill.style.background = view.color;
   bar.appendChild(fill);
 
-  // Ordem = grid do CSS (auto | minmax(70px,1fr) | auto | auto): nome fixo,
-  // barra flexível no meio, números à direita e moedas na última coluna.
+  // HP acima do teto (power-up VIDA — ex.: 125/100): a barra satura no teto
+  // (fill 100%) e o EXCEDENTE ganha um segmento verde sobreposto à direita —
+  // o bônus temporário fica visível de relance sem esconder o HP real.
+  if (view.overMax && view.overflow > 0) {
+    row.classList.add("is-overmax");
+    const over = document.createElement("div");
+    over.className = "player-fill-over";
+    over.style.width = `${Math.min(100, (view.overflow / view.maxHp) * 100)}%`;
+    bar.appendChild(over);
+  }
+
+  // Ordem = grid do CSS (auto | minmax(70px,1fr) | auto | auto | auto):
+  // nome fixo, barra flexível no meio, números à direita, badges de efeitos
+  // e moedas nas últimas colunas.
   row.append(name, bar, hp);
+
+  // Efeitos ativos de power-up — badges (❤️+25 / 🔱10s / 🛡️). Só aparecem
+  // quando o servidor broadcasta o efeito; somem sozinhos na expiração do
+  // timer, na morte e no fim de fase (o servidor limpa e o HUD espelha).
+  if (view.effectsLabels.length > 0) {
+    const effects = document.createElement("span");
+    effects.className = "player-effects";
+    effects.textContent = view.effectsLabels.join(" ");
+    row.appendChild(effects);
+  }
 
   // Moedas individuais — badge na última coluna do grid; só aparece quando
   // o estado fornece player.coins e o jogador está vivo (morto/aguardando

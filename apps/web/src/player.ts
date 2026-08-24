@@ -20,6 +20,12 @@ export interface PlayerObject extends GameObj {
   movePlayer(dir: number): void;
   jumpPlayer(force?: number): void;
   shoot(): void;
+  /**
+   * Tiro triplo (power-up): 3 projéteis paralelos com lanes -6/0/+6 — espelho
+   * do servidor (main.go OnShoot, TripleShotActive). Visual puro: o dano real
+   * é dos projéteis autoritativos do servidor.
+   */
+  shootTriple(): void;
   takeDamage(n: number): void;
   isGrounded(): boolean;
 }
@@ -36,6 +42,9 @@ interface PlayerBehavior {
   movePlayer(this: PlayerObject, dir: number): void;
   jumpPlayer(this: PlayerObject, force?: number): void;
   shoot(this: PlayerObject): void;
+  shootTriple(this: PlayerObject): void;
+  /** Dispara um projétil com deslocamento vertical `dy` (lane do tiro triplo). */
+  fireBullet(this: PlayerObject, dy: number): void;
   takeDamage(this: PlayerObject, n: number): void;
 }
 
@@ -53,10 +62,14 @@ export function createPlayer(k: KAPLAYCtx, opts: PlayerOpts): PlayerObject {
     jumpPlayer(force?: number) {
       if (this.isGrounded()) this.jump(force ?? 520);
     },
-    shoot() {
+    /**
+     * Dispara um projétil amigável na direção do facing, com deslocamento
+     * vertical `dy` (lanes do tiro triplo — 0 no tiro simples).
+     */
+    fireBullet(this: PlayerObject, dy: number): void {
       const b = add([
         "bullet",
-        pos(this.pos.x + this.facing * 24, this.pos.y - 10),
+        pos(this.pos.x + this.facing * 24, this.pos.y - 10 + dy),
         rect(12, 5),
         color(255, 220, 80),
         area(),
@@ -67,6 +80,17 @@ export function createPlayer(k: KAPLAYCtx, opts: PlayerOpts): PlayerObject {
         b.move(b.vel, 0);
         if (b.pos.x < 0 || b.pos.x > 9600) destroy(b);
       });
+    },
+    shoot() {
+      this.fireBullet(0);
+    },
+    shootTriple() {
+      // Espelho do servidor (main.go OnShoot + TripleShotActive): 3 projéteis
+      // paralelos com lanes -6/0/+6 enquanto o TIRO TRIPLO estiver ativo.
+      // Visual apenas — o dano vem dos projéteis autoritativos do servidor.
+      this.fireBullet(-6);
+      this.fireBullet(0);
+      this.fireBullet(6);
     },
     takeDamage(n: number) {
       this.hp -= n;

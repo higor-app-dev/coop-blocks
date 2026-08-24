@@ -99,6 +99,7 @@ export interface ParticlesConfig {
   effects: {
     shootImpact: EffectConfig;
     coinCollect: EffectConfig;
+    powerUpCollect: EffectConfig;
     enemyDeath: EffectConfig;
     respawn: EffectConfig;
     dust: EffectConfig;
@@ -108,6 +109,7 @@ export interface ParticlesConfig {
 export interface ParticlesHandle {
   spawnShootImpact(x: number, y: number): void;
   spawnCoinCollect(x: number, y: number): void;
+  spawnPowerUpCollect(x: number, y: number): void;
   spawnEnemyDeath(x: number, y: number): void;
   spawnRespawn(x: number, y: number): void;
   spawnDust(x: number, y: number, direction?: number): void;
@@ -168,6 +170,27 @@ export const DEFAULT_CONFIG: ParticlesConfig = {
       lifeMin: 0.35,
       lifeMax: 0.6,
       gravityScale: 1.0,
+    },
+
+    // Coleta de power-up: jato verde/ciano "de poder" que sobe e some devagar
+    // (feedback visual do power-up coletado — disparado pelo onCollect).
+    powerUpCollect: {
+      count: 14,
+      colors: [
+        [120, 255, 150], // verde vivo
+        [80, 220, 255], // ciano
+        [255, 255, 255], // brilho claro
+      ],
+      sizeMin: 4,
+      sizeMax: 7,
+      speedMin: 90,
+      speedMax: 240,
+      angleMin: 190,
+      angleMax: 350,
+      spread: 0,
+      lifeMin: 0.4,
+      lifeMax: 0.8,
+      gravityScale: 0.4,
     },
 
     // Morte de inimigo: explosão maior, vermelho/roxo, alguns flutuam mais.
@@ -344,6 +367,7 @@ export function createParticles(
   return {
     spawnShootImpact: (x, y) => burst(x, y, cfg.effects.shootImpact),
     spawnCoinCollect: (x, y) => burst(x, y, cfg.effects.coinCollect),
+    spawnPowerUpCollect: (x, y) => burst(x, y, cfg.effects.powerUpCollect),
     spawnEnemyDeath: (x, y) => burst(x, y, cfg.effects.enemyDeath),
     spawnRespawn: (x, y) => burst(x, y, cfg.effects.respawn),
     spawnDust: (x, y, direction) => burst(x, y, cfg.effects.dust, direction),

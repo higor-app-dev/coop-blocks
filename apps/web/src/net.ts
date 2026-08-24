@@ -90,6 +90,55 @@ export interface NetCoinUpdate {
   counts: NetCoinCounts;
 }
 
+/** Power-up ativo da fase no broadcast do servidor (posição top-left em px). */
+export interface NetPowerUp {
+  id: string;
+  /** Tipo do power-up: "vida" | "tiro_triplo" | "escudo" (PowerUpType.String). */
+  kind: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Power-up removido (coletado) em um update — id + tipo + posição p/ efeitos. */
+export interface NetPowerUpRemoved {
+  id: string;
+  kind: string;
+  x: number;
+  y: number;
+}
+
+/**
+ * Efeitos ativos de UM jogador (PlayerPowerUpsState do servidor):
+ * - vida: HP ACIMA do teto concedido pelo VIDA (0 = sem efeito; ex.: 25 → o
+ *   jogador tem 125/100);
+ * - tripleShot: TICKS RESTANTES do tiro triplo (0 = inativo; o client
+ *   converte para segundos com TicksPerSecond = 20 — 200 ticks = 10 s);
+ * - shield: cargas de escudo restantes (0/1 — absorve 1 hit e some).
+ */
+export interface NetPlayerEffects {
+  vida: number;
+  tripleShot: number;
+  shield: number;
+}
+
+/** Efeitos ativos por jogador (chave = id do jogador) — alimenta o HUD. */
+export type NetPowerUpEffects = Record<string, NetPlayerEffects>;
+
+/**
+ * Atualização de power-ups recebida do servidor:
+ * - broadcast `powerups` (PowerUpsMsg): estado restante + remoções deste
+ *   update (coletados) + efeitos ativos por jogador (HUD);
+ * - broadcast `players` (WorldMsg): estado completo + efeitos (remoções
+ *   sempre vazias — a reconciliação via estado completo cobre as coletas).
+ */
+export interface NetPowerUpUpdate {
+  powerUps: NetPowerUp[];
+  removed: NetPowerUpRemoved[];
+  effects: NetPowerUpEffects;
+}
+
 export interface NetOpts {
   url: string;
   player: GameObj<any>;
@@ -110,6 +159,12 @@ export interface NetOpts {
    * régua de 5 ou derrota) — o client esconde a renderização e a barra.
    */
   onBoss?: (state: NetBoss | null) => void;
+  /**
+   * Atualização de power-ups (estado + remoções + efeitos ativos por jogador).
+   * O client apenas espelha: renderiza os power-ups do servidor, toca o efeito
+   * de coleta nas remoções e alimenta o HUD com os efeitos (nunca decide).
+   */
+  onPowerUps?: (update: NetPowerUpUpdate) => void;
 }
 
 export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
@@ -166,6 +221,17 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
           if ("boss" in msg) {
             opts.onBoss?.(msg.boss ?? null);
           }
+          // WorldMsg: o broadcast periódico carrega o estado completo dos
+          // power-ups (powerUps) e os efeitos ativos por jogador
+          // (powerUpEffects — HUD). Só dispara quando o servidor envia os
+          // campos (compatibilidade com versões antigas).
+          if (Array.isArray(msg.powerUps) || msg.powerUpEffects !== undefined) {
+            opts.onPowerUps?.({
+              powerUps: msg.powerUps ?? [],
+              removed: [],
+              effects: msg.powerUpEffects ?? {},
+            });
+          }
         } else if (msg.type === "coins") {
           // CoinsMsg: atualização de moedas — estado restante, remoções deste
           // update (coletadas) e contadores por jogador da fase.
@@ -173,6 +239,14 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
             coins: msg.coins ?? [],
             removed: msg.removed ?? [],
             counts: msg.counts ?? {},
+          });
+        } else if (msg.type === "powerups") {
+          // PowerUpsMsg: atualização de power-ups — estado restante, remoções
+          // deste update (coletados) e efeitos ativos por jogador (HUD).
+          opts.onPowerUps?.({
+            powerUps: msg.powerUps ?? [],
+            removed: msg.removed ?? [],
+            effects: msg.effects ?? {},
           });
         } else if (msg.type === "phase") {
           opts.onPhase?.({

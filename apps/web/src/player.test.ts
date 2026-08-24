@@ -166,6 +166,40 @@ describe("shoot — tiro", () => {
   });
 });
 
+describe("shootTriple — tiro triplo (espelho do servidor)", () => {
+  it("cria 3 projéteis paralelos com lanes -6/0/+6 (mesmos do servidor)", () => {
+    const { engine, created } = makeFakeEngine();
+    const p = createPlayer(engine, { pos: { x: 100, y: 200 }, maxHp: 100 });
+    p.shootTriple();
+    // O player é o primeiro objeto; as 3 balas vêm em seguida.
+    const bullets = created.slice(1);
+    expect(bullets).toHaveLength(3);
+    for (const b of bullets) {
+      expect(b.comps).toContain("bullet");
+    }
+    const ys = bullets.map((b) => b.obj.pos.y);
+    // lanes -6/0/+6 em relação ao eixo do tiro (200 - 10 do offset do tiro).
+    expect(ys[0]).toBe(200 - 10 - 6);
+    expect(ys[1]).toBe(200 - 10);
+    expect(ys[2]).toBe(200 - 10 + 6);
+    // Todos apontam na direção do facing com a mesma velocidade.
+    const vel = (bullets[0].obj as unknown as { vel: number }).vel;
+    expect(vel).toBe(560);
+  });
+
+  it("aponta para a esquerda quando facing -1 (espelho do servidor)", () => {
+    const { engine, created } = makeFakeEngine();
+    const p = createPlayer(engine, { pos: { x: 100, y: 200 }, maxHp: 100 });
+    p.facing = -1;
+    p.shootTriple();
+    const bullets = created.slice(1);
+    expect(bullets).toHaveLength(3);
+    const vel = (bullets[0].obj as unknown as { vel: number }).vel;
+    expect(vel).toBe(-560);
+    expect(bullets[0].obj.pos.x).toBeLessThan(100);
+  });
+});
+
 describe("takeDamage — dano e morte", () => {
   it("reduz o HP pelo valor do dano e notifica onHpChange", () => {
     const { engine } = makeFakeEngine();

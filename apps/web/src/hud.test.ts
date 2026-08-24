@@ -7,16 +7,20 @@ import {
   clampArrowPoint,
   clampHp,
   createHud,
+  effectLabels,
   formatBossLabel,
   formatCoins,
   formatDeathMessage,
+  formatEffectTime,
   formatHud,
   formatPhaseLabel,
   formatRespawnLabel,
+  hpOverflow,
   hpPercent,
   hudArrows,
   isOffscreen,
   loadMutedSession,
+  overMaxHp,
   playerAbbr,
   playerRowView,
   saveMutedSession,
@@ -921,5 +925,158 @@ describe("persistência do mute (sessão)", () => {
     expect(loadMutedSession()).toBe(true);
     storage.set(MUTE_STORAGE_KEY, "0");
     expect(loadMutedSession()).toBe(false);
+  });
+});
+
+// ===== Efeitos de power-up + HP acima do teto =====
+
+describe("formatEffectTime — tempo restante do tiro triplo (ticks → segundos)", () => {
+  it("converte ticks do servidor em segundos (TicksPerSecond = 20)", () => {
+    expect(formatEffectTime(200)).toBe("10s"); // PowerUpTiroTriploDurationTicks = 10 s exatos
+    expect(formatEffectTime(20)).toBe("1s");
+    expect(formatEffectTime(1)).toBe("1s");
+  });
+
+  it("arredonda para cima (nunca mostra 0s enquanto ativo)", () => {
+    expect(formatEffectTime(21)).toBe("2s");
+    expect(formatEffectTime(19)).toBe("1s");
+    expect(formatEffectTime(5)).toBe("1s");
+  });
+});
+
+describe("effectLabels — badges de efeitos ativos", () => {
+  it("sem efeitos devolve lista vazia", () => {
+    expect(effectLabels(undefined)).toEqual([]);
+    expect(effectLabels({ vida: 0, tripleShot: 0, shield: 0 })).toEqual([]);
+  });
+
+  it("vida ativa mostra o bonus acima do teto", () => {
+    expect(effectLabels({ vida: 25, tripleShot: 0, shield: 0 })).toEqual(["❤️+25"]);
+  });
+
+  it("tiro triplo ativo mostra o tempo restante", () => {
+    expect(effectLabels({ vida: 0, tripleShot: 200, shield: 0 })).toEqual(["🔱10s"]);
+    expect(effectLabels({ vida: 0, tripleShot: 150, shield: 0 })).toEqual(["🔱8s"]);
+  });
+
+  it("escudo ativo mostra o indicador de carga", () => {
+    expect(effectLabels({ vida: 0, tripleShot: 0, shield: 1 })).toEqual(["🛡️"]);
+  });
+
+  it("todos os efeitos ativos aparecem juntos, em ordem estavel", () => {
+    expect(effectLabels({ vida: 25, tripleShot: 200, shield: 1 })).toEqual([
+      "❤️+25",
+      "🔱10s",
+      "🛡️",
+    ]);
+  });
+
+  it("campos ausentes sao tratados como inativos (guarda defensiva)", () => {
+    expect(effectLabels({} as any)).toEqual([]);
+    expect(effectLabels({ vida: 25 } as any)).toEqual(["❤️+25"]);
+  });
+});
+
+describe("HP acima do teto (power-up VIDA — 125/100)", () => {
+  it("overMaxHp detecta HP acima do teto", () => {
+    expect(overMaxHp(125, 100)).toBe(true);
+    expect(overMaxHp(100, 100)).toBe(false);
+    expect(overMaxHp(80, 100)).toBe(false);
+  });
+
+  it("hpOverflow devolve o excedente (0 quando dentro do teto)", () => {
+    expect(hpOverflow(125, 100)).toBe(25);
+    expect(hpOverflow(150, 100)).toBe(50);
+    expect(hpOverflow(100, 100)).toBe(0);
+    expect(hpOverflow(80, 100)).toBe(0);
+    expect(hpOverflow(0, 100)).toBe(0);
+  });
+
+  it("playerRowView expoe hp sem clamp superior, overflow e labels", () => {
+    const view = playerRowView(
+      player({
+        id: "p1",
+        hp: 125,
+        maxHp: 100,
+        effects: { vida: 25, tripleShot: 200, shield: 1 },
+      }),
+      "p1"
+    );
+    expect(view.hp).toBe(125); // NAO clampa no teto — mostra o estado real
+    expect(view.percent).toBe(100); // a barra satura no teto
+    expect(view.overMax).toBe(true);
+    expect(view.overflow).toBe(25);
+    expect(view.effectsLabels).toEqual(["❤️+25", "🔱10s", "🛡️"]);
+  });
+
+  it("playerRowView mantem HP intermediario sem flags de over-max", () => {
+    const view = playerRowView(player({ id: "p1", hp: 42, maxHp: 100 }), "p1");
+    expect(view.hp).toBe(42);
+    expect(view.percent).toBe(42);
+    expect(view.overMax).toBe(false);
+    expect(view.overflow).toBe(0);
+    expect(view.effectsLabels).toEqual([]);
+  });
+
+  it("playerRowView clampa HP negativo em 0 (nunca mostra barra negativa)", () => {
+    const view = playerRowView(player({ id: "p1", hp: -10, maxHp: 100 }), "p1");
+    expect(view.hp).toBe(0);
+    expect(view.percent).toBe(0);
+  });
+});
+
+describe("createHud — render de efeitos e HP acima do teto", () => {
+  it("HP acima do teto: texto cru, classe is-overmax e segmento de overflow", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudState([
+        player({ id: "p1", hp: 125, maxHp: 100, effects: { vida: 25, tripleShot: 0, shield: 0 } }),
+      ])
+    );
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    const row = panel.children[0];
+    expect(row.className).toContain("is-overmax");
+    const hp = byClass(row, "player-hp")[0];
+    expect(hp.textContent).toBe("125/100");
+    const fill = byClass(row, "player-fill")[0];
+    expect(fill.style.width).toBe("100%"); // barra satura no teto
+    const over = byClass(row, "player-fill-over")[0];
+    expect(over.style.width).toBe("25%"); // excedente em destaque
+  });
+
+  it("sem excedente nao renderiza o segmento de overflow", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudState([player({ id: "p1", hp: 75, maxHp: 100 })]));
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    const row = panel.children[0];
+    expect(row.className).not.toContain("is-overmax");
+    expect(byClass(row, "player-fill-over")).toHaveLength(0);
+  });
+
+  it("renderiza badges de efeitos na linha do jogador", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudState([
+        player({ id: "p1", hp: 125, maxHp: 100, effects: { vida: 25, tripleShot: 200, shield: 1 } }),
+        player({ id: "p2", hp: 80, maxHp: 100 }),
+      ])
+    );
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    const withEffects = panel.children[0];
+    const effects = byClass(withEffects, "player-effects")[0];
+    expect(effects.textContent).toBe("❤️+25 🔱10s 🛡️");
+    // Jogador sem efeitos nao ganha o elemento.
+    expect(byClass(panel.children[1], "player-effects")).toHaveLength(0);
+  });
+
+  it("linha sem efeitos mantem a ordem original do grid (nome → barra → HP)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudState([player({ id: "p1", hp: 42, maxHp: 100 })]));
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    expect(panel.children[0].children.map((c) => c.className)).toEqual([
+      "player-name",
+      "player-bar",
+      "player-hp",
+    ]);
   });
 });

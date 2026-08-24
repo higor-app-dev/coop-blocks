@@ -10,6 +10,7 @@ import {
 import { generateLevel, isLevelFinished, TILE, mulberry32, type LevelData } from "./levelgen";
 import { connectToServer, type NetCoin, type NetPhaseState, type NetPlayer } from "./net";
 import { createCoinLayer, levelCoin } from "./coins";
+import { createPowerUpLayer } from "./powerups";
 import { createInput } from "./input";
 import { computeButtonSpecs } from "./touch-buttons";
 import {
@@ -151,6 +152,24 @@ let serverCoins = false;
 // badges de moedas do HUD no multiplayer.
 let coinCounts: Record<string, number> = {};
 
+// ===== Power-ups (multiplayer — servidor autoritativo) =====
+// A powerUpLayer é a ÚNICA criadora/destruidora de power-ups renderizados
+// (tag "powerup"): ela espelha o estado autoritativo do servidor (WorldMsg
+// `powerUps` / PowerUpsMsg `removed`) e o onCollect dispara o feedback de
+// coleta (som + partículas) quando o servidor anuncia a remoção — o client
+// NUNCA decide efeitos nem gera power-ups (singleplayer offline = camada
+// vazia, sem power-ups: sem servidor, sem efeito).
+const powerUpLayer = createPowerUpLayer(k, {
+  onCollect: (r) => {
+    playPowerUp();
+    particles.spawnPowerUpCollect(r.x, r.y);
+  },
+});
+// Efeitos ativos por jogador (broadcast do servidor — powerUpEffects):
+// alimentam os badges do HUD, o tiro triplo do jogador local e a bolha de
+// escudo. Presença/ausência é 100% espelho do servidor.
+let powerUpEffects: Record<string, { vida: number; tripleShot: number; shield: number }> = {};
+
 // ===== HUD =====
 // Overlay criado uma única vez; o estado completo do jogo é passado a cada
 // frame no onUpdate (seção "Câmera + HUD" abaixo). O botão de mute alterna
@@ -288,6 +307,11 @@ function buildWorld(number: number, maxHp: number): void {
   // O mundo novo não tem boss até o servidor broadcastar (SpawnForLevel nas
   // fases múltiplas de 5) — a camada nasce vazia a cada reconstrução.
   bossLayer.clear();
+  // Power-ups: camada vazia a cada reconstrução (o servidor broadcasta os da
+  // fase nova) e efeitos da fase anterior zerados — efeitos não vazam entre
+  // fases (PowerUpManager.Reset + ReviveAll no servidor; o client espelha).
+  powerUpLayer.clear();
+  powerUpEffects = {};
 }
 
 // ===== Jogador local =====
@@ -310,6 +334,21 @@ let coinWallet = 0;
 // Transição de fase em andamento — impede disparo duplicado do fim de mapa.
 let transitioning = false;
 buildWorld(1, MAX_HP);
+
+// ===== Bolha de escudo do jogador local (poder visual — espelho do servidor) =====
+// Anel azul ao redor do player enquanto o ESCUDO (power-up) estiver ativo.
+// Nasce oculto; o onUpdate mostra/esconde conforme o broadcast de efeitos
+// (shield > 0). Quando o servidor consome a carga (absorveu 1 hit e o escudo
+// some), o próximo broadcast traz shield = 0 e a bolha desaparece — o client
+// apenas reflete, nunca decide.
+const shieldBubble = add([
+  "shield-bubble",
+  pos(0, 0),
+  rect(34, 46, { fill: false, radius: 8 }),
+  outline(2, rgb(120, 200, 255)),
+  z(9),
+]);
+shieldBubble.hidden = true;
 
 // ===== Loja entre fases (overlay) =====
 // Aparece quando o servidor abre a loja (phase="shop"); comprar dispara
@@ -543,6 +582,25 @@ const server = connectToServer(k, {
   // Boss da fase (fases múltiplas de 5): espelha posição/estado/HP do
   // servidor — o bloco aparece/some conforme o broadcast (null esconde).
   onBoss: (state) => bossLayer.apply(state),
+  // Power-ups do servidor (estado completo + remoções + efeitos por jogador):
+  // o primeiro broadcast assume a autoridade (camada local/antiga descartada)
+  // e a renderização passa a espelhar exatamente o que o servidor manda.
+  // Remoções são aplicadas ANTES do estado completo para o efeito de coleta
+  // não se perder quando o power-up coletado já saiu do estado restante no
+  // mesmo broadcast. Os efeitos alimentam o HUD, o tiro triplo e a bolha de
+  // escudo — o client só REFLETE o que o servidor decidiu.
+  onPowerUps: ({ powerUps, removed, effects }) => {
+    if (removed.length > 0) powerUpLayer.applyRemoved(removed);
+    powerUpLayer.applyFull(powerUps);
+    powerUpEffects = effects;
+    // Efeito VIDA no jogador local: o servidor elevou o HP acima do teto
+    // (BoostHPAboveMax — 100 → 125). O client espelha o estado autoritativo
+    // (max() evita "curar" — só sobe quando o servidor diz que o bônus existe).
+    const mine = effects[server.myId()];
+    if (mine && mine.vida > 0) {
+      player.hp = Math.max(player.hp, playerMaxHp + mine.vida);
+    }
+  },
 });
 
 // ===== Controles (input adaptativo: teclado + touch) =====
@@ -637,6 +695,10 @@ function buildHudState(): HudState {
       // vindo do broadcast do servidor. Offline o contador é o teamCoins
       // (canto superior direito) — sem badge aqui.
       coins: serverCoins ? (coinCounts[server.myId()] ?? 0) : undefined,
+      // Efeitos ativos de power-up (multiplayer): badges do HUD (❤️+25 /
+      // 🔱10s / 🛡️) + HP acima do teto — espelho do broadcast do servidor.
+      // Offline não há efeitos (o client nunca se concede power-ups).
+      effects: powerUpEffects[server.myId()],
     });
   }
   for (const np of netPlayers) {
@@ -649,6 +711,9 @@ function buildHudState(): HudState {
       x: np.x,
       y: np.y,
       coins: serverCoins ? (coinCounts[np.id] ?? 0) : undefined,
+      // Efeitos ativos do jogador remoto (broadcast powerUpEffects) — os
+      // badges de poder do companheiro aparecem no painel dele.
+      effects: powerUpEffects[np.id],
     });
   }
 
@@ -717,7 +782,15 @@ onUpdate(() => {
         player.pos.x + player.facing * 24,
         player.pos.y - 10
       );
-      player.shoot();
+      // Tiro triplo (power-up): o servidor decide (TripleShotActive no OnShoot
+      // — 3 projéteis com lanes -6/0/+6) e o client espelha o MESMO padrão
+      // visual quando o efeito está ativo no broadcast. Sem o efeito (ou
+      // offline), tiro simples.
+      if ((powerUpEffects[server.myId()]?.tripleShot ?? 0) > 0) {
+        player.shootTriple();
+      } else {
+        player.shoot();
+      }
       // Servidor autoritativo: ele valida o cooldown (fire_rate) e cria o
       // projétil que causa dano a inimigos e ao boss (HitBoss) — o client
       // só envia a intenção e renderiza o estado broadcastado.
@@ -756,6 +829,15 @@ onUpdate(() => {
     particles.spawnDust(player.pos.x, player.pos.y + 20);
   }
   wasGrounded = grounded;
+
+  // Bolha de escudo: segue o player enquanto o ESCUDO (power-up) estiver
+  // ativo no broadcast de efeitos; some sozinha quando o servidor consome a
+  // carga (absorveu 1 hit → shield = 0 no próximo broadcast).
+  const shieldActive = (powerUpEffects[server.myId()]?.shield ?? 0) > 0;
+  shieldBubble.hidden = !shieldActive;
+  if (shieldActive) {
+    shieldBubble.pos = vec2(player.pos.x - 3, player.pos.y - 3);
+  }
 
   if (player.exists()) k.setCamPos(vec2(player.pos.x, 360));
   hud.update(buildHudState());

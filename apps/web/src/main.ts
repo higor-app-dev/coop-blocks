@@ -197,6 +197,32 @@ let localDeadSince = 0;
 const bossLayer = createBossLayer(k);
 // DEBUG — expõe a camada para o smoke test e2e (mesmo padrão das moedas).
 (window as unknown as Record<string, unknown>).__dbgBoss = bossLayer;
+// DEBUG — estado ao vivo para o smoke test e2e (mesmo padrão das moedas/boss).
+(window as unknown as Record<string, unknown>).__dbgGame = {
+  get player() {
+    return player
+      ? { x: player.pos.x, y: player.pos.y, hp: player.hp, hidden: player.hidden, paused: player.paused }
+      : null;
+  },
+  get playerObj() {
+    return player;
+  },
+  get coinLayer() {
+    return coinLayer;
+  },
+  get coins() {
+    return { teamCoins, serverCoins, active: coinLayer.size(), phase: currentLevelNumber };
+  },
+  get enemies() {
+    return k.get("enemy").map((e) => ({ x: e.pos.x, y: e.pos.y, hp: e.hp }));
+  },
+  get bullets() {
+    return k.get("bullet").map((b) => ({ x: b.pos.x, y: b.pos.y, vel: b.vel }));
+  },
+  hurt: (n: number) => hurtLocalPlayer(n),
+  dropAt: (x: number, y: number) => dropCoins(x, y),
+  shoot: () => player.shoot(),
+};
 
 // ===== Inicialização do áudio no primeiro gesto =====
 // A política de autoplay dos browsers deixa o AudioContext suspenso até um
@@ -245,19 +271,19 @@ function buildWorld(number: number, maxHp: number): void {
   });
   level.render();
 
-  // Moedas da fase — singleplayer local (offline): espelho do servidor
-  // (Level.CoinSpawns — fileira do chão: x>=6, x%4==0) com a MESMA conversão
-  // tile→px (levelCoin: centro da coluna, flutuando 30px, top-left da hitbox
-  // 14x14). No multiplayer o primeiro broadcast de moedas assume a autoridade
+  // Moedas da fase — singleplayer local (offline): o gerador de fase
+  // (levelgen.ts, generateLevelData → coinSpawns) decide ONDE ficam as
+  // moedas com as MESMAS regras do servidor (Level.CoinSpawns: chão com
+  // x>=6/x%4==0 + topos de plataforma com scatter seed-dependente), e aqui
+  // só convertemos tile→px (levelCoin: centro da coluna, flutuando 30px,
+  // top-left da hitbox 14x14) com IDs sequenciais c1..cN na ordem canônica
+  // — os MESMOS IDs/posições que o servidor atribuiria à fase. No
+  // multiplayer o primeiro broadcast de moedas assume a autoridade
   // (serverCoins=true) e estas locais são descartadas pela coinLayer.clear().
   if (!serverCoins) {
-    const groundRow = Math.max(...level.tiles.map((t) => t.y)) - 1;
-    const localCoins: NetCoin[] = [];
-    for (const t of level.tiles) {
-      if (t.y === groundRow && t.x >= 6 && t.x % 4 === 0) {
-        localCoins.push(levelCoin(t.x, t.y, `c${localCoins.length + 1}`));
-      }
-    }
+    const localCoins: NetCoin[] = level.coinSpawns.map((t, i) =>
+      levelCoin(t.x, t.y, `c${i + 1}`)
+    );
     coinLayer.applyFull(localCoins);
   }
 

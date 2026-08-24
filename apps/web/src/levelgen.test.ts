@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  CoinColumnStep,
+  CoinSeedXor,
+  CoinStartCol,
   GapPeriod,
   GapWidth,
   MinSpecHeight,
@@ -433,6 +436,7 @@ describe("generateLevel — wrapper kaplay", () => {
     expect(level.tiles).toEqual(pure.tiles);
     expect(level.playerSpawn).toEqual(pure.playerSpawn);
     expect(level.enemySpawns).toEqual(pure.enemySpawns);
+    expect(level.coinSpawns).toEqual(pure.coinSpawns);
 
     level.render();
     expect(calls.length).toBe(pure.tiles.length);
@@ -444,5 +448,161 @@ describe("generateLevel — wrapper kaplay", () => {
   it("propaga RangeError de spec inválido", () => {
     const k = {} as never;
     expect(() => generateLevel(k, { width: 4, height: 4, seed: 1 })).toThrow(RangeError);
+  });
+});
+
+// ===== Moedas no gerador de fase (espelho do Level.CoinSpawns do servidor) =====
+// As regras abaixo são a porta TS do passo 5 do level.go do servidor Go
+// (apps/api/internal/game/level.go) + as constantes de coins.go
+// (CoinStartCol/CoinColumnStep). Os goldens foram capturados rodando
+// GenerateLevel do apps/api (go run ./cmd/dumpcoins) — se quebrarem, client
+// e servidor divergiram na seed compartilhada.
+
+describe("generateLevelData — moedas douradas (paridade com o servidor Go)", () => {
+  // CoinSpawns (x,y) em ordem canônica para 120x12, capturados do Go.
+  const goldens: Array<{ seed: number; coins: string }> = [
+    {
+      seed: 0,
+      coins:
+        "8,10;11,8;12,10;16,10;19,7;20,10;24,10;32,10;40,10;43,6;43,8;44,10;47,7;48,10;52,10;56,10;59,6;60,10;68,10;75,7;76,10;79,6;79,8;80,10;84,10;88,10;92,10;95,6;96,10;104,10;107,7;112,10;115,7;116,10",
+    },
+    {
+      seed: 42,
+      coins:
+        "3,7;7,7;8,10;12,10;16,10;20,10;23,6;24,10;27,8;32,10;35,7;40,10;44,10;48,10;52,10;56,10;59,8;60,10;68,10;71,7;76,10;79,6;79,8;80,10;84,10;88,10;92,10;95,8;96,10;104,10;111,8;112,10;116,10",
+    },
+    {
+      seed: 123456789,
+      coins:
+        "8,8;8,10;12,10;16,10;20,7;20,10;24,10;28,7;32,6;32,10;36,8;40,10;44,8;44,10;48,6;48,10;52,10;56,6;56,10;60,10;68,6;68,8;68,10;76,10;80,10;84,10;88,10;92,6;92,8;92,10;96,7;96,10;100,6;104,7;104,10;108,7;112,10;116,10",
+    },
+    {
+      seed: 4294967295,
+      coins:
+        "5,8;8,10;12,10;16,10;17,8;20,10;21,6;24,10;32,10;33,6;40,10;41,6;44,10;48,10;49,7;52,10;53,8;56,10;60,10;65,7;68,10;76,10;80,10;81,7;84,10;88,10;89,6;92,10;96,10;104,10;105,8;109,6;112,10;113,6;116,10;117,6",
+    },
+  ];
+
+  it.each(goldens)("seed $seed gera as MESMAS moedas que o servidor Go", ({ seed, coins }) => {
+    const d = generateLevelData({ width: 120, height: 12, seed });
+    const got = d.coinSpawns.map((c) => `${c.x},${c.y}`).join(";");
+    expect(got).toBe(coins);
+  });
+});
+
+describe("generateLevelData — moedas presentes em toda fase", () => {
+  // Espelho do TestLevelCoinSpawnsPresentesEmTodaFase do servidor Go: cada
+  // fase carrega um conjunto de moedas coletáveis; reconstrói o conjunto
+  // exato esperado pela regra do gerador (chão + topos expostos com o passo
+  // deslocado pela seed) e confere igualdade + nunca enterrada/sobre lacuna.
+  it("toda fase tem moedas: chão + topos expostos, sem faltar/sobrar", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const ctx = `${s.name} seed ${seed}`;
+        const spec = specOf(s, seed);
+        const d = generateLevelData(spec);
+        const groundY = spec.height - 2;
+        const solid = new Set(d.tiles.map((t) => `${t.x},${t.y}`));
+        const has = (x: number, y: number) => solid.has(`${x},${y}`);
+
+        const coinOffset = Math.floor(mulberry32(seed ^ CoinSeedXor)() * CoinColumnStep);
+        const want = new Set<string>();
+        // a) chão: fileira do chão, regra do servidor (paridade exata)
+        for (let tx = 0; tx < spec.width; tx++) {
+          if (tx >= CoinStartCol && tx % CoinColumnStep === 0 && has(tx, groundY)) {
+            want.add(`${tx},${groundY}`);
+          }
+        }
+        // b) plataformas: topo exposto acima do chão, passo deslocado
+        for (const t of d.tiles) {
+          if (t.y >= groundY || has(t.x, t.y - 1)) continue;
+          if ((t.x + coinOffset) % CoinColumnStep === 0) {
+            want.add(`${t.x},${t.y}`);
+          }
+        }
+        expect(want.size, ctx).toBeGreaterThan(0);
+
+        const got = new Set(d.coinSpawns.map((c) => `${c.x},${c.y}`));
+        expect(got.size, ctx).toBe(d.coinSpawns.length); // sem duplicatas
+        for (const c of d.coinSpawns) {
+          expect(c.y, ctx).toBeLessThanOrEqual(groundY); // nada abaixo do chão
+          expect(has(c.x, c.y), `${ctx} moeda ${c.x},${c.y} sem tile sólido`).toBe(true);
+          expect(has(c.x, c.y - 1), `${ctx} moeda ${c.x},${c.y} enterrada`).toBe(false);
+        }
+        expect(got.size, ctx).toBe(want.size);
+        for (const k of want) expect(got.has(k), `${ctx} faltou moeda em ${k}`).toBe(true);
+        for (const k of got) expect(want.has(k), `${ctx} moeda extra em ${k}`).toBe(true);
+      }
+    }
+  });
+
+  it("determinístico: mesma seed ⇒ exatamente as mesmas moedas", () => {
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const spec = specOf(s, seed);
+        const a = generateLevelData(spec).coinSpawns;
+        const b = generateLevelData(spec).coinSpawns;
+        expect(b).toEqual(a);
+      }
+    }
+  });
+
+  it("regra do chão: exatamente colunas sólidas com x>=6 e x%4==0", () => {
+    // Espelho do TestLevelCoinSpawnsRegraChao: paridade da fileira do chão
+    // com o servidor — nem mais, nem menos.
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const ctx = `${s.name} seed ${seed}`;
+        const spec = specOf(s, seed);
+        const d = generateLevelData(spec);
+        const groundY = spec.height - 2;
+        const solid = new Set(d.tiles.map((t) => `${t.x},${t.y}`));
+        const want = new Set<string>();
+        for (let tx = 0; tx < spec.width; tx++) {
+          if (tx >= CoinStartCol && tx % CoinColumnStep === 0 && solid.has(`${tx},${groundY}`)) {
+            want.add(`${tx},${groundY}`);
+          }
+        }
+        const got = new Set(
+          d.coinSpawns.filter((c) => c.y === groundY).map((c) => `${c.x},${c.y}`)
+        );
+        expect(got.size, ctx).toBe(want.size);
+        for (const k of want) expect(got.has(k), `${ctx} faltou moeda de chão em ${k}`).toBe(true);
+      }
+    }
+  });
+
+  it("scatter seed-dependente e esparso por fileira", () => {
+    // Espelho do TestLevelCoinSpawnsScatterSeedDependente: fases distintas
+    // produzem conjuntos de moedas distintos (spec do client, com
+    // plataformas suficientes) e, na mesma fileira, colunas separadas por
+    // múltiplos de CoinColumnStep (nunca duas moedas coladas).
+    const sigs = new Set<string>();
+    for (const seed of testSeeds) {
+      const d = generateLevelData({ width: 120, height: 12, seed });
+      sigs.add(d.coinSpawns.map((c) => `${c.x},${c.y}`).join(";"));
+    }
+    expect(sigs.size).toBeGreaterThanOrEqual(3);
+
+    for (const s of testSpecs) {
+      for (const seed of testSeeds) {
+        const d = generateLevelData(specOf(s, seed));
+        const byRow = new Map<number, number[]>();
+        for (const c of d.coinSpawns) {
+          const xs = byRow.get(c.y) ?? [];
+          xs.push(c.x);
+          byRow.set(c.y, xs);
+        }
+        for (const [row, xs] of byRow) {
+          xs.sort((a, b) => a - b);
+          for (let i = 1; i < xs.length; i++) {
+            expect(
+              (xs[i] - xs[i - 1]) % CoinColumnStep,
+              `seed ${seed} fileira ${row} moedas em ${xs[i - 1]} e ${xs[i]} violam o passo`
+            ).toBe(0);
+          }
+        }
+      }
+    }
   });
 });

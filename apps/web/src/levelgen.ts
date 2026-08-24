@@ -37,6 +37,13 @@ export interface LevelData {
   tiles: Tile[]; // tiles "solid" (coordenadas de tile, ordenados, sem duplicatas)
   playerSpawn: { x: number; y: number }; // pixels
   enemySpawns: Array<{ x: number; y: number }>; // pixels
+  /**
+   * Posições de moedas da fase (chão + topos expostos de plataforma) em
+   * coordenadas de tile, ordenadas por (x, y) — espelho do Level.CoinSpawns
+   * do servidor Go (apps/api/internal/game/level.go, passo 5). A conversão
+   * tile→pixels fica na camada de moedas (coins.ts, levelCoin).
+   */
+  coinSpawns: Tile[];
   render(): void;
 }
 
@@ -47,6 +54,15 @@ export const GapWidth = 2; // largura de cada lacuna, em tiles (tx%9 ∈ {0,1})
 export const PlayerSpawnX = 2; // coluna do spawn do jogador
 export const MinSpecWidth = GapPeriod; // largura mínima aceita (client usa 120)
 export const MinSpecHeight = 6; // altura mínima aceita (client usa 12)
+
+// Regras de moedas no gerador de fase (mesmas do servidor Go — level.go
+// usa as constantes CoinStartCol/CoinColumnStep de coins.go).
+export const CoinStartCol = 6; // primeira coluna de moedas do chão (tx >= 6)
+export const CoinColumnStep = 4; // moedas a cada N colunas (tx % 4 === 0)
+// XOR aplicado à seed para a stream própria das moedas (scatter das
+// plataformas) — NÃO altera a ordem de consumo do layout (mesma constante
+// 0x9E3779B9 do servidor Go em level.go passo 5).
+export const CoinSeedXor = 0x9e3779b9;
 
 // Largura do hitbox do jogador em pixels — mesma do servidor
 // (apps/api/internal/game/player.go: PlayerWidth = 28.0).
@@ -119,6 +135,7 @@ export function generateLevelData(spec: LevelSpec): {
   tiles: Tile[];
   playerSpawn: { x: number; y: number };
   enemySpawns: Array<{ x: number; y: number }>;
+  coinSpawns: Tile[];
 } {
   validateSpec(spec);
 
@@ -186,9 +203,43 @@ export function generateLevelData(spec: LevelSpec): {
     })
     .sort((a, b) => a.x - b.x || a.y - b.y);
 
+  // 5) Moedas: posições determinísticas da fase — espelho fiel do servidor
+  //    Go (Level.CoinSpawns, level.go passo 5). Regras:
+  //      - chão: coluna sólida da fileira do chão com x >= CoinStartCol e
+  //        x % CoinColumnStep == 0 — regra histórica do client, paridade
+  //        exata com o servidor, garantia de moedas coletáveis andando em
+  //        TODA fase;
+  //      - plataformas: topo exposto (tile sólido acima do chão com espaço
+  //        livre em cima — nunca enterrada em parede), selecionado com um
+  //        deslocamento sorteado da seed (coinOffset): a mesma coluna de
+  //        plataforma pode ter moeda numa fase e não em outra — scatter
+  //        seed-dependente. A stream é própria (mulberry32(seed ^
+  //        CoinSeedXor)) e NÃO altera a ordem de consumo do layout;
+  //      - saída ordenada por (x, y), como o servidor.
+  const coinSpawns: Tile[] = [];
+  const coinRnd = mulberry32(spec.seed ^ CoinSeedXor);
+  const coinOffset = Math.floor(coinRnd() * CoinColumnStep);
+  // a) Chão: fileira do chão, mesmo critério do servidor (paridade exata).
+  for (let tx = 0; tx < spec.width; tx++) {
+    if (tx >= CoinStartCol && tx % CoinColumnStep === 0 && hasTile(tx, groundY)) {
+      coinSpawns.push({ x: tx, y: groundY });
+    }
+  }
+  // b) Plataformas: superfícies expostas acima do chão (tile sólido sem
+  //    sólido em cima), com o passo deslocado pela seed.
+  for (const t of tiles) {
+    if (t.y >= groundY || hasTile(t.x, t.y - 1)) {
+      continue; // chão já coberto em (a); tile com sólido em cima = enterrado
+    }
+    if ((t.x + coinOffset) % CoinColumnStep === 0) {
+      coinSpawns.push(t);
+    }
+  }
+  coinSpawns.sort((a, b) => a.x - b.x || a.y - b.y);
+
   const playerSpawn = { x: PlayerSpawnX * TILE, y: groundY * TILE - 42 };
 
-  return { tiles, playerSpawn, enemySpawns };
+  return { tiles, playerSpawn, enemySpawns, coinSpawns };
 }
 
 /**
@@ -198,12 +249,13 @@ export function generateLevelData(spec: LevelSpec): {
  */
 export function generateLevel(k: KAPLAYCtx, spec: LevelSpec): LevelData {
   const { add, pos, rect, color, area, body, z } = k;
-  const { tiles, playerSpawn, enemySpawns } = generateLevelData(spec);
+  const { tiles, playerSpawn, enemySpawns, coinSpawns } = generateLevelData(spec);
 
   return {
     tiles,
     playerSpawn,
     enemySpawns,
+    coinSpawns,
     render() {
       for (const t of tiles) {
         add([

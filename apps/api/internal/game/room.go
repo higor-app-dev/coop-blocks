@@ -17,11 +17,17 @@ var (
 	ErrWrongPassword     = errors.New("senha incorreta")
 )
 
-// PlayerState é o estado sincronizado de um jogador.
+// PlayerState é o estado sincronizado de um jogador, enviado ao client via
+// broadcast. X/Y são pixels (top-left do hitbox); VX/VY são velocidades em
+// px/s; Grounded/Facing vêm da física do servidor (player.go).
 type PlayerState struct {
-	X  int `json:"x"`
-	Y  int `json:"y"`
-	HP int `json:"hp"`
+	X        int     `json:"x"`
+	Y        int     `json:"y"`
+	VX       float64 `json:"vx"`
+	VY       float64 `json:"vy"`
+	HP       int     `json:"hp"`
+	Grounded bool    `json:"grounded"`
+	Facing   int     `json:"facing"`
 }
 
 // Player representa um jogador conectado a uma sala.

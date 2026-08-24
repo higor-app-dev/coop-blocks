@@ -74,10 +74,10 @@ const (
 // ===== helpers de wire do boss =====
 
 type bossWire struct {
-	id              string
-	x, y            int
+	id               string
+	x, y             int
 	hp, maxHp, phase int
-	state           string
+	state            string
 }
 
 // parseBoss extrai o campo boss de um broadcast do mundo ("players").
@@ -95,13 +95,13 @@ func parseBoss(m map[string]any) (*bossWire, bool) {
 		return nil, false
 	}
 	return &bossWire{
-		id:     b["id"].(string),
-		x:      int(b["x"].(float64)),
-		y:      int(b["y"].(float64)),
-		hp:     int(b["hp"].(float64)),
-		maxHp:  int(b["maxHp"].(float64)),
-		phase:  int(b["phase"].(float64)),
-		state:  b["state"].(string),
+		id:    b["id"].(string),
+		x:     int(b["x"].(float64)),
+		y:     int(b["y"].(float64)),
+		hp:    int(b["hp"].(float64)),
+		maxHp: int(b["maxHp"].(float64)),
+		phase: int(b["phase"].(float64)),
+		state: b["state"].(string),
 	}, true
 }
 
@@ -339,7 +339,7 @@ func TestBossCicloVidaE2E(t *testing.T) {
 	c.esperaPosicao(2600, 450, 5*time.Second)
 	c.atira()
 	time.Sleep(180 * time.Millisecond)
-	c.atira() // e7 (atirador @2688) morto — o boss (2832) fica intocado
+	c.atira()                   // e7 (atirador @2688) morto — o boss (2832) fica intocado
 	c.estado(3400, 450, 100, 1) // atravessa o boss vivo (2832..2928)
 	c.esperaPosicao(3400, 450, 5*time.Second)
 	c.atira()
@@ -453,7 +453,7 @@ func TestBossCicloVidaE2E(t *testing.T) {
 
 	// Drop gordo: 20 moedas na fileira alta na janela do ponto da morte.
 	time.Sleep(300 * time.Millisecond) // deixa o broadcast do drop chegar
-	c.estado(3400, dodgeY, 100, 1)      // afasta do drop (não coleta nada)
+	c.estado(3400, dodgeY, 100, 1)     // afasta do drop (não coleta nada)
 	c.esperaPosicao(3400, dodgeY, 5*time.Second)
 	dropsDepois := moedasNaFileiraAlta(c)
 	if dropsDepois-dropsAntes != 20 {

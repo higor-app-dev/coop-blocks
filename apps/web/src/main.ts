@@ -25,6 +25,13 @@ const k = kaplay({
   pixelDensity: Math.min(window.devicePixelRatio || 1, 2),
 });
 
+// ===== Gravidade =====
+// kaplay 3001 inicializa game.gravity = null por padrão (o config `gravity`
+// NÃO é lido do objeto de opções). Sem gravidade o componente `body` nunca
+// aterra (isGrounded() sempre false) → pulo nunca dispara e o jogador não cai
+// em buracos. setGravity(980) = ~1g para o mundo de 960x540.
+k.setGravity(980);
+
 // ===== Canvas responsivo: reconfigura em resize/orientação =====
 // O Kaplay 3001 já re-letterboxa sozinho (ResizeObserver interno no canvas +
 // recompute do viewport). Aqui só reforçamos o buffer na resolução atual do

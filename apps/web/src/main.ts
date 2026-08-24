@@ -1,7 +1,13 @@
 import kaplay from "kaplay";
 import { createPlayer } from "./player";
-import { spawnEnemy } from "./enemies";
-import { generateLevel, TILE, type LevelData } from "./levelgen";
+import {
+  ENEMY_MAX_COIN_DROP,
+  ENEMY_MIN_COIN_DROP,
+  pickEnemyType,
+  spawnEnemy,
+  type EnemyShot,
+} from "./enemies";
+import { generateLevel, TILE, mulberry32, type LevelData } from "./levelgen";
 import { connectToServer, type NetPhaseState, type NetPlayer } from "./net";
 import { createInput } from "./input";
 import { computeButtonSpecs } from "./touch-buttons";
@@ -107,7 +113,8 @@ const {
 const MAX_HP = 100;
 // Tags dos objetos que pertencem ao MUNDO (mapa atual) e são destruídos na
 // transição de fase — o player é reutilizado entre mapas, não entra aqui.
-const WORLD_TAGS = ["solid", "coin", "enemy"];
+// "hostile" são os projéteis do atirador (IA local), limpos junto do mundo.
+const WORLD_TAGS = ["solid", "coin", "enemy", "hostile"];
 
 // ===== Áudio + partículas =====
 // Mute aplicado IMEDIATAMENTE (master gain nasce no estado correto mesmo
@@ -194,9 +201,40 @@ function buildWorld(number: number, maxHp: number): void {
     }
   }
 
-  // Inimigos (base).
+  // Inimigos (IA 100% local, singleplayer offline): um por spawn do levelgen,
+  // com tipo sorteado do pool da fase (andador 1+, voador 3+, atirador 5+) via
+  // mulberry32 da seed do mapa — mesmo elenco determinístico a cada
+  // reconstrução da fase (reset/spawn). O núcleo puro de enemies.ts consome o
+  // grid (tiles sólidos) e o player local como alvo do atirador.
+  const solidTiles = new Set(level.tiles.map((t) => `${t.x},${t.y}`));
+  const enemyWorld = {
+    width: 120 * TILE,
+    height: 12 * TILE,
+    solid: (tx: number, ty: number) => solidTiles.has(`${tx},${ty}`),
+  };
+  const localPlayerForAi = () => [
+    {
+      id: "local",
+      x: player.pos.x,
+      y: player.pos.y,
+      w: 28,
+      h: 40,
+      hp: player.hp,
+    },
+  ];
+  const enemyRng = mulberry32(number);
+  let enemySeq = 0;
   for (const p of level.enemySpawns) {
-    spawnEnemy(k, { pos: p, damage: 10, maxHp: MAX_HP });
+    enemySeq += 1;
+    spawnEnemy(k, {
+      pos: p,
+      type: pickEnemyType(number, enemyRng),
+      phase: number,
+      id: `e${enemySeq}`,
+      world: enemyWorld,
+      players: localPlayerForAi,
+      onShot: spawnHostileShot,
+    });
   }
 
   // Player local: reposiciona no spawn do novo mapa com o teto efetivo.
@@ -242,33 +280,40 @@ onCollide("player", "coin", (pl, c) => {
   teamCoins += 1;
 });
 
-// player × enemy — dano, feedback de hit; morte → som/partículas + respawn.
-onCollide("player", "enemy", (pl, en) => {
-  if (pl.hp > 0) {
-    pl.hp -= en.damage;
-    playDamage();
-    particles.spawnDust(pl.pos.x, pl.pos.y + 20, 90);
-    if (pl.hp <= 0) {
-      pl.hp = 0;
-      pl.trigger("death");
-      playDeath();
-      particles.spawnEnemyDeath(pl.pos.x, pl.pos.y);
-      // Squad wipe com 1 player (singleplayer local): a morte do único
-      // jogador = time inteiro morto → RESET da fase atual com a MESMA seed
-      // (moedas e inimigos renascem; o mundo é reconstruído idêntico).
-      // Delay de 3s = DefaultRespawnTicks do servidor. Não destrói o objeto:
-      // esconde + pausa (os handlers ainda referenciam o mesmo player) e o
-      // buildWorld reposiciona no spawn com HP cheio.
-      localDead = true;
-      pl.hidden = true;
-      pl.paused = true;
-      wait(3, () => {
-        buildWorld(currentLevelNumber, playerMaxHp);
-        playPowerUp();
-        particles.spawnRespawn(player.pos.x, player.pos.y);
-      });
-    }
+// Dano no jogador local (contato de inimigo ou projétil hostil): HP cai,
+// feedback de áudio/partículas e, na morte, squad wipe com 1 player = RESET
+// da fase atual com a MESMA seed após 3 s (DefaultRespawnTicks do servidor).
+function hurtLocalPlayer(n: number): void {
+  if (player.hp <= 0) return;
+  player.hp -= n;
+  playDamage();
+  particles.spawnDust(player.pos.x, player.pos.y + 20, 90);
+  if (player.hp <= 0) {
+    player.hp = 0;
+    player.trigger("death");
+    playDeath();
+    particles.spawnEnemyDeath(player.pos.x, player.pos.y);
+    // Squad wipe com 1 player (singleplayer local): a morte do único
+    // jogador = time inteiro morto → RESET da fase atual com a MESMA seed
+    // (moedas e inimigos renascem; o mundo é reconstruído idêntico).
+    // Delay de 3s = DefaultRespawnTicks do servidor. Não destrói o objeto:
+    // esconde + pausa (os handlers ainda referenciam o mesmo player) e o
+    // buildWorld reposiciona no spawn com HP cheio.
+    localDead = true;
+    player.hidden = true;
+    player.paused = true;
+    wait(3, () => {
+      buildWorld(currentLevelNumber, playerMaxHp);
+      playPowerUp();
+      particles.spawnRespawn(player.pos.x, player.pos.y);
+    });
   }
+}
+
+// player × enemy — dano de contato (mesmo para os 3 tipos; o valor vive no
+// objeto: ENEMY_CONTACT_DAMAGE, 10).
+onCollide("player", "enemy", (pl, en) => {
+  hurtLocalPlayer(en.damage);
 });
 
 // bullet × solid — impacto de tiro + destrói a bala.
@@ -277,18 +322,87 @@ onCollide("bullet", "solid", (b) => {
   destroy(b);
 });
 
-// bullet × enemy — dano no inimigo; morte → explosão + som.
+// bullet × enemy — dano no inimigo (HP por tipo: andador 25, voador/atirador
+// 50); morte → explosão + som + drop de moedas.
 onCollide("bullet", "enemy", (b, en) => {
   particles.spawnShootImpact(b.pos.x, b.pos.y);
   en.hp -= b.damage;
   if (en.hp <= 0) {
     playDeath();
     particles.spawnEnemyDeath(en.pos.x, en.pos.y);
+    dropCoins(en.pos.x, en.pos.y);
     destroy(en);
   } else {
     playDamage();
   }
   destroy(b);
+});
+
+// Drop de moedas na destruição do inimigo (1–3, faixa do servidor): moedas
+// estáticas espalhadas ao redor do ponto de morte — a coleta reusa a colisão
+// player × coin (som + partículas + contador do HUD).
+function dropCoins(x: number, y: number): void {
+  const count = Math.floor(rand(ENEMY_MIN_COIN_DROP, ENEMY_MAX_COIN_DROP + 1));
+  for (let i = 0; i < count; i++) {
+    add([
+      "coin",
+      pos(x + (i - (count - 1) / 2) * 16, y - 6),
+      rect(14, 14),
+      color(255, 215, 60),
+      area(),
+      z(3),
+    ]);
+  }
+}
+
+// ===== Projéteis hostis (atirador, IA local) =====
+// O atirador dispara na direção do player; o projétil viaja em linha reta com
+// velocidade constante, some ao sair do mundo ou após o lifetime (260 px/s e
+// 4 s, mesmos do servidor) e acerta o player (25 de dano, ProjectileDamage).
+function spawnHostileShot(shot: EnemyShot): void {
+  const dx = shot.targetX - shot.x;
+  const dy = shot.targetY - shot.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const vx = (dx / dist) * shot.speed;
+  const vy = (dy / dist) * shot.speed;
+
+  const hb = add([
+    "hostile",
+    pos(shot.x - 5, shot.y - 5),
+    rect(10, 10),
+    color(255, 140, 200),
+    area(),
+    z(8),
+    { damage: 25 },
+  ]);
+  const WORLD_W = 120 * TILE;
+  const WORLD_H = 12 * TILE;
+  hb.onUpdate(() => {
+    hb.move(vx, vy); // move() é por segundo no kaplay
+    if (
+      hb.pos.x < -40 ||
+      hb.pos.x > WORLD_W + 40 ||
+      hb.pos.y < -40 ||
+      hb.pos.y > WORLD_H + 40
+    ) {
+      destroy(hb);
+    }
+  });
+  wait(shot.lifetime, () => {
+    if (hb.exists()) destroy(hb);
+  });
+}
+
+// hostile × player — projétil do atirador: mesmo dano e morte do contato.
+onCollide("hostile", "player", (hb) => {
+  hurtLocalPlayer(hb.damage);
+  destroy(hb);
+});
+
+// hostile × solid — impacto de tiro + destrói o projétil.
+onCollide("hostile", "solid", (hb) => {
+  particles.spawnShootImpact(hb.pos.x, hb.pos.y);
+  destroy(hb);
 });
 
 // ===== Multiplayer (WebSocket) =====

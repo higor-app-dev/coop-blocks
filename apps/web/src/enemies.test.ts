@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TILE, mulberry32 } from "./levelgen";
 import {
   ENEMY_ATIRADOR_COOLDOWN_TICKS,
@@ -11,6 +11,7 @@ import {
   createEnemy,
   enemyTypePool,
   pickEnemyType,
+  spawnEnemy,
   stepEnemy,
   type EnemyPlayer,
   type EnemyShot,
@@ -336,5 +337,148 @@ describe("determinismo — mesma entrada, mesma saída", () => {
     expect(ENEMY_SIZE.andador).toEqual({ w: 30, h: 30 });
     expect(ENEMY_SIZE.voador).toEqual({ w: 34, h: 28 });
     expect(ENEMY_SIZE.atirador).toEqual({ w: 30, h: 36 });
+  });
+});
+
+// ===== Camada kaplay (spawnEnemy) com engine fake =====
+// O módulo não importa kaplay em runtime; o fake satisfaz as APIs usadas pelo
+// wrapper e rastreia objetos criados e callbacks de onUpdate para as asserções.
+
+interface FakeObj {
+  tags: string[];
+  pos: { x: number; y: number };
+  children: unknown[][];
+  add: (comps: unknown[]) => void;
+  exists: () => boolean;
+}
+
+function makeFakeKaplay() {
+  const created: FakeObj[] = [];
+  const updates: Array<() => void> = [];
+  const k = {
+    add: vi.fn((comps: unknown[]) => {
+      const obj: FakeObj = {
+        tags: comps.filter((c): c is string => typeof c === "string"),
+        pos: { x: 0, y: 0 },
+        children: [],
+        add: (c: unknown[]) => {
+          obj.children.push(c);
+        },
+        exists: () => true,
+      };
+      const posComp = comps.find(
+        (c): c is { x: number; y: number } =>
+          typeof c === "object" &&
+          c !== null &&
+          typeof (c as { x?: unknown }).x === "number" &&
+          typeof (c as { y?: unknown }).y === "number"
+      );
+      if (posComp) obj.pos = { x: posComp.x, y: posComp.y };
+      created.push(obj);
+      return obj;
+    }),
+    pos: vi.fn((x: number, y: number) => ({ x, y })),
+    rect: vi.fn((w: number, h: number, o?: unknown) => ({ w, h, o })),
+    color: vi.fn((r: number, g: number, b: number) => ({ r, g, b })),
+    area: vi.fn(() => ({})),
+    z: vi.fn((v: number) => ({ v })),
+    vec2: vi.fn((x: number, y: number) => ({ x, y })),
+    dt: vi.fn(() => 1 / 60),
+    onUpdate: vi.fn((fn: () => void) => {
+      updates.push(fn);
+    }),
+  };
+  return { k, created, updates };
+}
+
+describe("spawnEnemy — wrapper kaplay (engine fake)", () => {
+  const world = groundWorld(W, H, GROUND);
+
+  it("andador: tag enemy, rect/cor do tipo e posição inicial no spawn", () => {
+    const { k, created } = makeFakeKaplay();
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(3),
+      type: "andador",
+      phase: 1,
+      id: "e1",
+      world,
+      players: () => [],
+    });
+    expect(created).toHaveLength(1);
+    expect(e.tags).toContain("enemy");
+    expect(k.rect).toHaveBeenCalledWith(30, 30, { radius: 4 });
+    expect(k.color).toHaveBeenCalledWith(235, 70, 70);
+    expect(e.pos).toEqual({ x: 3 * TILE, y: GROUND_TOP - 30 });
+  });
+
+  it("voador: rect/cor próprios e flutua acima do chão", () => {
+    const { k, created } = makeFakeKaplay();
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(3),
+      type: "voador",
+      phase: 3,
+      id: "e1",
+      world,
+      players: () => [],
+    });
+    expect(created).toHaveLength(1);
+    expect(k.rect).toHaveBeenCalledWith(34, 28, { radius: 10 });
+    expect(k.color).toHaveBeenCalledWith(90, 210, 120);
+    expect(e.pos.y).toBe(GROUND_TOP - 28 - TILE);
+  });
+
+  it("atirador: rect/cor próprios e ganha o cano (filho)", () => {
+    const { k, created } = makeFakeKaplay();
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(3),
+      type: "atirador",
+      phase: 5,
+      id: "e1",
+      world,
+      players: () => [],
+    });
+    expect(created).toHaveLength(1);
+    expect(k.rect).toHaveBeenCalledWith(30, 36, { radius: 4 });
+    expect(k.color).toHaveBeenCalledWith(190, 120, 235);
+    expect(e.children).toHaveLength(1); // cano
+    expect(e.pos.y).toBe(GROUND_TOP - 36);
+  });
+
+  it("onUpdate avança a IA e aplica a posição (andador anda)", () => {
+    const { k, updates } = makeFakeKaplay();
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(2),
+      type: "andador",
+      phase: 1,
+      id: "e1",
+      world,
+      players: () => [],
+    });
+    expect(updates).toHaveLength(1);
+    const x0 = e.pos.x;
+    for (let i = 0; i < 60; i++) updates[0](); // 1 s de patrulha
+    expect(e.pos.x).toBeGreaterThan(x0);
+  });
+
+  it("atirador: onShot é chamado apontando para o centro do player", () => {
+    const { k, updates } = makeFakeKaplay();
+    const onShot = vi.fn();
+    const p = player("local", 600, GROUND_TOP - 30);
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(8),
+      type: "atirador",
+      phase: 5,
+      id: "e1", // shootIn = 1 % 40
+      world,
+      players: () => [p],
+      onShot,
+    });
+    for (let i = 0; i < 2; i++) updates[0](); // cooldown inicial zera → dispara
+    expect(onShot).toHaveBeenCalledTimes(1);
+    const shot = onShot.mock.calls[0][0] as EnemyShot;
+    expect(shot.targetX).toBeCloseTo(p.x + p.w / 2, 5);
+    expect(shot.targetY).toBeCloseTo(p.y + p.h / 2, 5);
+    expect(shot.speed).toBe(260);
+    expect(shot.lifetime).toBe(4);
   });
 });

@@ -19,6 +19,13 @@ export interface LevelSpec {
   width: number; // tiles horizontais
   height: number; // tiles verticais
   seed: number; // semente do PRNG mulberry32 (coerção uint32 via >>> 0)
+  /**
+   * Fase atual (1-based) — dificuldade progressiva do singleplayer local:
+   * fases maiores têm plataformas menores e spawns de inimigos mais densos.
+   * Default 1 mantém a paridade EXATA com o gerador do servidor Go (golden
+   * tests) — o escalonamento só começa a partir da fase 2.
+   */
+  difficulty?: number;
 }
 
 export interface Tile {
@@ -40,6 +47,37 @@ export const GapWidth = 2; // largura de cada lacuna, em tiles (tx%9 ∈ {0,1})
 export const PlayerSpawnX = 2; // coluna do spawn do jogador
 export const MinSpecWidth = GapPeriod; // largura mínima aceita (client usa 120)
 export const MinSpecHeight = 6; // altura mínima aceita (client usa 12)
+
+// Largura do hitbox do jogador em pixels — mesma do servidor
+// (apps/api/internal/game/player.go: PlayerWidth = 28.0).
+export const PLAYER_WIDTH = 28;
+
+// Dificuldade progressiva (singleplayer local, divergência deliberada do
+// espelho Go que NÃO escala por fase): a partir da fase 2, cada fase
+// - encolhe plataformas suspensas em até MaxPlatformShrink tiles; e
+// - aproxima os spawns de inimigos em até MaxEnemyDensity tiles (mais
+//   inimigos na mesma extensão de mapa).
+export const MaxPlatformShrink = 2;
+export const MaxEnemyDensity = 4;
+
+/**
+ * Dificuldade efetiva da fase: inteiro >= 1 (spec.difficulty ausente/ inválido
+ * → 1, que reproduz o gerador do servidor bit-a-bit).
+ */
+export function clampDifficulty(difficulty?: number): number {
+  const d = Math.floor(difficulty ?? 1);
+  return Number.isFinite(d) && d >= 1 ? d : 1;
+}
+
+/**
+ * A fase terminou quando a borda direita do hitbox do jogador (largura
+ * PLAYER_WIDTH) cruza a primeira coluna do fim (widthTiles-1) — espelho do
+ * Level.Finished do servidor Go (apps/api/internal/game/level.go), que usa o
+ * mesmo PlayerWidth. Chegar ao fim do mapa é o gatilho da transição de fase.
+ */
+export function isLevelFinished(widthTiles: number, playerX: number): boolean {
+  return playerX + PLAYER_WIDTH >= (widthTiles - 1) * TILE;
+}
 
 /**
  * PRNG mulberry32 — porta exata do gerador do servidor. Duas instâncias com a
@@ -86,6 +124,14 @@ export function generateLevelData(spec: LevelSpec): {
 
   const rnd = mulberry32(spec.seed);
   const groundY = spec.height - 2;
+  // Dificuldade progressiva: fase 1 = paridade exata com o servidor Go
+  // (shrinks zerados). A partir da fase 2 as plataformas encolhem e os spawns
+  // de inimigos ficam mais próximos (mais inimigos). Nenhum consumo EXTRA de
+  // RNG — os ajustes são funções puras do mesmo valor sorteado, então o
+  // determinismo por (seed, dificuldade) e a paridade por seed continuam.
+  const difficulty = clampDifficulty(spec.difficulty);
+  const platformShrink = Math.min(MaxPlatformShrink, difficulty - 1);
+  const enemyDensity = Math.min(MaxEnemyDensity, difficulty - 1);
 
   const solid = new Set<string>();
   const tileKey = (x: number, y: number) => `${x},${y}`;
@@ -104,18 +150,20 @@ export function generateLevelData(spec: LevelSpec): {
   }
 
   // 2) Plataformas suspensas aleatórias (mesma ordem de consumo do RNG do Go).
+  //    Fases maiores encolhem o comprimento sorteado (min 1 tile).
   for (let i = 0; i < Math.floor(spec.width / 6); i++) {
     const px = Math.floor(rnd() * (spec.width - 4)) + 2;
     const py = groundY - 2 - Math.floor(rnd() * 3);
-    const len = 2 + Math.floor(rnd() * 3);
+    const len = Math.max(1, 2 + Math.floor(rnd() * 3) - platformShrink);
     for (let l = 0; l < len; l++) {
       addTile(px + l, py);
     }
   }
 
   // 3) Spawns de inimigos: sobre o chão, longe do spawn do jogador.
+  //    Fases maiores reduzem o passo entre spawns (mais inimigos no mapa).
   const enemySpawns: Array<{ x: number; y: number }> = [];
-  for (let tx = 12; tx < spec.width - 1; tx += 5 + Math.floor(rnd() * 4)) {
+  for (let tx = 12; tx < spec.width - 1; tx += Math.max(2, 5 + Math.floor(rnd() * 4) - enemyDensity)) {
     if (hasTile(tx, groundY)) {
       enemySpawns.push({ x: tx * TILE, y: groundY * TILE - 30 });
     }

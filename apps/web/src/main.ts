@@ -7,7 +7,7 @@ import {
   spawnEnemy,
   type EnemyShot,
 } from "./enemies";
-import { generateLevel, TILE, mulberry32, type LevelData } from "./levelgen";
+import { generateLevel, isLevelFinished, TILE, mulberry32, type LevelData } from "./levelgen";
 import { connectToServer, type NetPhaseState, type NetPlayer } from "./net";
 import { createInput } from "./input";
 import { computeButtonSpecs } from "./touch-buttons";
@@ -182,7 +182,12 @@ function buildWorld(number: number, maxHp: number): void {
   }
   teamCoins = 0;
 
-  level = generateLevel(k, { width: 120, height: 12, seed: number });
+  level = generateLevel(k, {
+    width: 120,
+    height: 12,
+    seed: number,
+    difficulty: number,
+  });
   level.render();
 
   // Moedas (coleta): fileira sobre o chão (toda 4ª coluna sólida). Topo do
@@ -258,6 +263,13 @@ player.onDestroy(() => {
 });
 
 let teamCoins = 0;
+// Caixa individual de moedas (persiste entre fases — é o saldo que a loja
+// local usa). teamCoins é só o contador da fase atual e zera a cada
+// buildWorld; na transição de fase o caixa recebe o total da fase ANTES do
+// rebuild. Morte/reset da fase NÃO mexe no caixa (só no contador da fase).
+let coinWallet = 0;
+// Transição de fase em andamento — impede disparo duplicado do fim de mapa.
+let transitioning = false;
 buildWorld(1, MAX_HP);
 
 // ===== Loja entre fases (overlay) =====
@@ -569,7 +581,9 @@ function buildHudState(): HudState {
     localPlayerId: server.myId() || "local",
     camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
     teamCoins,
-    phase: phaseState ? `Fase ${phaseState.number}` : undefined,
+    // Sem servidor (singleplayer local offline), a fase exibida é a local
+    // (currentLevelNumber) — o broadcast da run é quem manda no multiplayer.
+    phase: phaseState ? `Fase ${phaseState.number}` : `Fase ${currentLevelNumber}`,
     status: localDead ? formatDeathMessage() : undefined,
   };
 }
@@ -610,6 +624,32 @@ onUpdate(() => {
       );
       player.shoot();
     }
+  }
+
+  // Fim do mapa → próxima fase (singleplayer local, offline): a borda direita
+  // do player cruzou a primeira coluna do fim (isLevelFinished espelha o
+  // Level.Finished do servidor Go). Preserva as moedas da fase no caixa
+  // individual ANTES do buildWorld (que zera o contador da fase), avança o
+  // número da fase (= nova seed e dificuldade +1, levelgen) e reconstrói o
+  // mundo. Só dispara com o player vivo, fora de transição e sem broadcast de
+  // fase do servidor — em multiplayer o servidor é dono da máquina de fases.
+  if (
+    !transitioning &&
+    !localDead &&
+    player.exists() &&
+    player.hp > 0 &&
+    !phaseState &&
+    isLevelFinished(120, player.pos.x)
+  ) {
+    transitioning = true;
+    playPowerUp();
+    particles.spawnCoinCollect(player.pos.x, player.pos.y);
+    wait(1.2, () => {
+      coinWallet += teamCoins;
+      currentLevelNumber += 1;
+      buildWorld(currentLevelNumber, playerMaxHp);
+      transitioning = false;
+    });
   }
 
   const grounded = player.exists() && player.isGrounded();

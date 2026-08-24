@@ -4,10 +4,13 @@ import {
   GapWidth,
   MinSpecHeight,
   MinSpecWidth,
+  PLAYER_WIDTH,
   PlayerSpawnX,
   TILE,
+  clampDifficulty,
   generateLevel,
   generateLevelData,
+  isLevelFinished,
   mulberry32,
 } from "./levelgen";
 import type { LevelSpec } from "./levelgen";
@@ -281,6 +284,129 @@ describe("paridade client ↔ servidor Go — golden (120x12)", () => {
     const spec = { width: 120, height: 12, seed };
     const d = generateLevelData(spec);
     expect(signature(spec, d)).toBe(sig);
+  });
+});
+
+describe("isLevelFinished — fim do mapa", () => {
+  const W = 120;
+  const endX = (W - 1) * TILE; // primeira coluna do fim (tile 119)
+
+  it("não termina antes da borda direita do hitbox cruzar o fim", () => {
+    expect(isLevelFinished(W, endX - PLAYER_WIDTH - 1)).toBe(false);
+    expect(isLevelFinished(W, 0)).toBe(false);
+  });
+
+  it("termina quando a borda direita atinge a primeira coluna do fim", () => {
+    // borda direita = playerX + PLAYER_WIDTH; cruza em (W-1)*TILE
+    expect(isLevelFinished(W, endX - PLAYER_WIDTH)).toBe(true);
+    expect(isLevelFinished(W, endX)).toBe(true);
+  });
+
+  it("espelha Level.Finished do servidor Go (mesmo PlayerWidth=28)", () => {
+    // o servidor usa px + PlayerWidth >= (Width-1)*TileSize
+    expect(isLevelFinished(W, endX - 28)).toBe(true);
+    expect(isLevelFinished(W, endX - 29)).toBe(false);
+  });
+});
+
+describe("clampDifficulty — dificuldade efetiva da fase", () => {
+  it("default/inválido → 1 (paridade com o servidor Go)", () => {
+    expect(clampDifficulty(undefined)).toBe(1);
+    expect(clampDifficulty(0)).toBe(1);
+    expect(clampDifficulty(-5)).toBe(1);
+    expect(clampDifficulty(NaN)).toBe(1);
+    expect(clampDifficulty(Infinity)).toBe(1);
+  });
+
+  it("arredonda para baixo e respeita mínimo 1", () => {
+    expect(clampDifficulty(2)).toBe(2);
+    expect(clampDifficulty(2.9)).toBe(2);
+    expect(clampDifficulty(1.1)).toBe(1);
+  });
+});
+
+describe("generateLevelData — dificuldade progressiva", () => {
+  const spec = (difficulty?: number): LevelSpec => ({
+    width: 120,
+    height: 12,
+    seed: 42,
+    ...(difficulty !== undefined ? { difficulty } : {}),
+  });
+
+  /** Maior corrida contígua de tiles sólidos suspensos (não-chão) por linha. */
+  function maxPlatformRun(d: ReturnType<typeof generateLevelData>): number {
+    const rows = new Map<number, number[]>();
+    const groundY = 10;
+    for (const t of d.tiles) {
+      if (t.y < groundY) {
+        const col = rows.get(t.y) ?? [];
+        col.push(t.x);
+        rows.set(t.y, col);
+      }
+    }
+    let best = 0;
+    for (const cols of rows.values()) {
+      cols.sort((a, b) => a - b);
+      let run = 1;
+      for (let i = 1; i < cols.length; i++) {
+        run = cols[i] === cols[i - 1] + 1 ? run + 1 : 1;
+        best = Math.max(best, run);
+      }
+      best = Math.max(best, cols.length > 0 ? 1 : 0);
+    }
+    return best;
+  }
+
+  it("difficulty ausente ≡ difficulty 1 (paridade bit-a-bit)", () => {
+    for (const seed of [0, 1, 42, 123456789, 4294967295]) {
+      const a = generateLevelData(spec());
+      const b = generateLevelData({ ...spec(), difficulty: 1 });
+      expect(b.tiles).toEqual(a.tiles);
+      expect(b.playerSpawn).toEqual(a.playerSpawn);
+      expect(b.enemySpawns).toEqual(a.enemySpawns);
+    }
+  });
+
+  it("fases maiores ⇒ mais spawns de inimigos (mesma seed)", () => {
+    const base = generateLevelData(spec(1)).enemySpawns.length;
+    expect(generateLevelData(spec(2)).enemySpawns.length).toBeGreaterThanOrEqual(base);
+    expect(generateLevelData(spec(5)).enemySpawns.length).toBeGreaterThan(base);
+    // densidade satura em MaxEnemyDensity — fases altas não ficam triviais
+    const d10 = generateLevelData(spec(10)).enemySpawns.length;
+    const d20 = generateLevelData(spec(20)).enemySpawns.length;
+    expect(d20).toBe(d10);
+  });
+
+  it("fases maiores ⇒ plataformas suspensas menores ou iguais", () => {
+    const run1 = maxPlatformRun(generateLevelData(spec(1)));
+    const run5 = maxPlatformRun(generateLevelData(spec(5)));
+    expect(run5).toBeLessThanOrEqual(run1);
+    // nenhuma plataforma vira buraco no chão: spawn e fim continuam sólidos
+    for (const diff of [1, 2, 3, 5, 10]) {
+      const d = generateLevelData(spec(diff));
+      const solid = new Set(d.tiles.map((t) => `${t.x},${t.y}`));
+      expect(solid.has(`${PlayerSpawnX},10`)).toBe(true);
+      for (let tx = 120 - GapWidth; tx < 120; tx++) {
+        expect(solid.has(`${tx},10`)).toBe(true);
+      }
+    }
+  });
+
+  it("determinístico por (seed, difficulty)", () => {
+    for (const diff of [1, 2, 5]) {
+      const a = generateLevelData(spec(diff));
+      const b = generateLevelData(spec(diff));
+      expect(b.tiles).toEqual(a.tiles);
+      expect(b.enemySpawns).toEqual(a.enemySpawns);
+    }
+  });
+
+  it("seed nova entre fases consecutivas ⇒ mapas diferentes", () => {
+    // fase N usa seed N (convenção do client): mapa 2 ≠ mapa 1 na MESMA dificuldade
+    const m1 = generateLevelData({ width: 120, height: 12, seed: 1, difficulty: 1 });
+    const m2 = generateLevelData({ width: 120, height: 12, seed: 2, difficulty: 1 });
+    expect(m2.tiles).not.toEqual(m1.tiles);
+    expect(m2.enemySpawns).not.toEqual(m1.enemySpawns);
   });
 });
 

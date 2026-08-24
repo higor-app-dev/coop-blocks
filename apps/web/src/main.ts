@@ -169,8 +169,6 @@ const powerUpLayer = createPowerUpLayer(k, {
 // alimentam os badges do HUD, o tiro triplo do jogador local e a bolha de
 // escudo. Presença/ausência é 100% espelho do servidor.
 let powerUpEffects: Record<string, { vida: number; tripleShot: number; shield: number }> = {};
-// DEBUG — expõe a camada para o smoke test e2e (mesmo padrão das moedas/boss).
-(window as unknown as Record<string, unknown>).__dbgPowerUp = powerUpLayer;
 
 // ===== HUD =====
 // Overlay criado uma única vez; o estado completo do jogo é passado a cada

@@ -45,9 +45,33 @@ func main() {
 		projectiles.FireEnemyShot(sh)
 	})
 
+	// Moedas da fase: dono autoritativo do estado (entidades + contador por
+	// jogador DA FASE, separado da carteira persistente em sim). Espalhadas
+	// pelo grid inicial; drops de inimigos usam SpawnAt (mesma trilha de
+	// coleta/zeramento). Sem pool comum — cada player tem o próprio contador.
+	coins := game.NewCoinManagerDefault()
+	coins.SpawnForLevel(&level)
+
 	// Simulação de HP/moedas/respawn: aplica dano de contato e de projétil
 	// hostil, e credita as moedas dos drops aos atiradores.
 	sim := game.NewSimDefault(game.NewRandomSource(int64(level.Spec.Seed)))
+
+	// Aplica dano e reage à morte: zera o contador de moedas DA FASE do
+	// jogador (morte no mapa atual) e broadcasta as contagens. A carteira
+	// persistente/gasta (sim.Coins) não é tocada pela morte.
+	applyDamage := func(id string, dmg int) {
+		evs, err := sim.ApplyDamage(id, dmg)
+		if err != nil {
+			log.Printf("damage %s: %v", id, err)
+			return
+		}
+		for _, ev := range evs {
+			if ev.Type == game.EventDeath {
+				coins.ResetPlayer(ev.PlayerID)
+				hub.Broadcast(game.CoinsMsg(coins.Snapshot(), nil, coins.Counts()))
+			}
+		}
+	}
 
 	// Bridge: eventos do hub -> sala, e broadcast da sala -> hub
 	hub.OnJoin(func(c *ws.Client) {
@@ -94,9 +118,7 @@ func main() {
 			// 1) Inimigos: IA determinística + contato com jogadores.
 			for _, ev := range enemies.Step(&level, players) {
 				if ev.Type == game.EnemyEventPlayerHit {
-					if _, err := sim.ApplyDamage(ev.PlayerID, ev.Damage); err != nil {
-						log.Printf("enemy contact damage: %v", err)
-					}
+					applyDamage(ev.PlayerID, ev.Damage)
 				}
 			}
 
@@ -113,14 +135,26 @@ func main() {
 						}
 					}
 				case game.HitPlayer:
-					if _, err := sim.ApplyDamage(h.TargetID, h.Damage); err != nil {
-						log.Printf("enemy shot damage: %v", err)
-					}
+					applyDamage(h.TargetID, h.Damage)
 				}
 			}
 
+			// 3) Moedas: coleta por sobreposição (remove + contador do player +
+			//    broadcast com remoções e contagens para todos os clientes).
+			var removed []game.CoinRemoved
+			for _, ev := range coins.Step(players) {
+				if ev.Type == game.CoinEventCollected {
+					removed = append(removed, game.CoinRemoved{
+						ID: ev.CoinID, X: int(ev.X), Y: int(ev.Y),
+					})
+				}
+			}
+			if len(removed) > 0 {
+				hub.Broadcast(game.CoinsMsg(coins.Snapshot(), removed, coins.Counts()))
+			}
+
 			if tick%2 == 0 {
-				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot()))
+				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot(), coins.Snapshot(), coins.Counts()))
 			}
 		}
 	}()

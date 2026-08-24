@@ -20,6 +20,36 @@ func main() {
 		addr = ":8080"
 	}
 
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           newGameServer(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("coop-blocks api listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down…")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutdownCtx)
+}
+
+// newGameServer monta o servidor completo do jogo (hub, sala, simulação,
+// projéteis, inimigos, moedas, loja e máquina de fases) e devolve o handler
+// HTTP. Foi extraído de main() para que os testes E2E executem a MESMA
+// fiação do binário em processo (httptest + WebSocket real, com -race) em
+// vez de replicar a lógica — o que o teste cobre é exatamente o que roda em
+// produção.
+func newGameServer() http.Handler {
 	hub := ws.NewHub()
 	room := game.NewRoom("default")
 
@@ -314,10 +344,20 @@ func main() {
 				}
 
 				// 3) Moedas: coleta por sobreposição (remove + contador do
-				//    player + broadcast com remoções e contagens).
+				//    player + CRÉDITO NA CARTEIRA da run + broadcast com
+				//    remoções e contagens). Cada moeda coletada vale 1 moeda
+				//    de carteira (Sim.AddCoins) — é essa carteira persistente
+				//    que a loja entre fases gasta. O contador da fase
+				//    (coins.Counts) é separado: é o display do HUD do mapa
+				//    atual, zerado na morte; a carteira sobrevive à morte e
+				//    às fases. Sem este crédito, ninguém jamais teria saldo
+				//    para comprar upgrades na loja (bug de integração).
 				var removed []game.CoinRemoved
 				for _, ev := range coins.Step(players) {
 					if ev.Type == game.CoinEventCollected {
+						if _, err := sim.AddCoins(ev.PlayerID, 1); err != nil {
+							log.Printf("creditar moeda %s: %v", ev.PlayerID, err)
+						}
 						removed = append(removed, game.CoinRemoved{
 							ID: ev.CoinID, X: int(ev.X), Y: int(ev.Y),
 						})
@@ -357,27 +397,7 @@ func main() {
 	})
 	mux.HandleFunc("/api/ws", hub.ServeWS)
 
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           logRequests(mux),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	go func() {
-		log.Printf("coop-blocks api listening on %s", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
-	}()
-
-	<-ctx.Done()
-	log.Println("shutting down…")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	return logRequests(mux)
 }
 
 func logRequests(next http.Handler) http.Handler {

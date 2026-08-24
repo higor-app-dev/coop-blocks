@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Coop Blocks</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0f0f1a;
+        overflow: hidden;
+        font-family: system-ui, sans-serif;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #fff;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 4px 14px;
+        border-radius: 999px;
+        font-size: 13px;
+        z-index: 10;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">🧱 coop-blocks — conectando ao servidor…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

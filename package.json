@@ -1,0 +1,19 @@
+{
+  "name": "coop-blocks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jogo de plataforma coop multiplayer — API Go + web KaboomJS, geração automática de fases",
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  }
+}

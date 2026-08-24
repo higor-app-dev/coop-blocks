@@ -1,4 +1,4 @@
-import type { KaplayCtx } from "kaplay";
+import type { KAPLAYCtx } from "kaplay";
 
 /**
  * Inimigo de contato: ao relar no player, causa `damage` de HP.
@@ -9,7 +9,7 @@ export interface EnemyOpts {
   maxHp: number;
 }
 
-export function spawnEnemy(k: KaplayCtx, opts: EnemyOpts) {
+export function spawnEnemy(k: KAPLAYCtx, opts: EnemyOpts) {
   const { add, pos, rect, color, area, body, z, onUpdate } = k;
 
   const e = add([

@@ -3,6 +3,8 @@ import { createPlayer } from "./player";
 import { spawnEnemy } from "./enemies";
 import { generateLevel } from "./levelgen";
 import { connectToServer, type NetPlayer } from "./net";
+import { ACTION_KEYS, keyToAction } from "./input";
+import { formatDeathMessage, formatHud } from "./hud";
 
 // ===== Configuração do jogo =====
 const k = kaplay({
@@ -37,7 +39,7 @@ const MAX_HP = 100;
 // ===== HUD =====
 const hudEl = document.getElementById("hud")!;
 function updateHud(hp: number, netCount: number) {
-  hudEl.textContent = `🧱 coop-blocks — HP ${hp}/${MAX_HP} — jogadores online: ${netCount}`;
+  hudEl.textContent = formatHud(hp, MAX_HP, netCount);
 }
 
 // ===== Fase gerada automaticamente =====
@@ -51,7 +53,7 @@ const player = createPlayer(k, {
   onHpChange: (hp) => updateHud(hp, netPlayers.length),
 });
 player.onDestroy(() => {
-  hudEl.textContent = `💀 Você morreu! Recarregue a página para reiniciar.`;
+  hudEl.textContent = formatDeathMessage();
 });
 
 // ===== Inimigos (base) =====
@@ -102,10 +104,17 @@ const server = connectToServer(k, {
 });
 
 // ===== Controles =====
-onKeyDown("left", () => player.move(-1));
-onKeyDown("right", () => player.move(1));
-onKeyPress("space", () => player.jump());
-onKeyPress("x", () => player.shoot());
+// Teclas de "segurar" (movimento) via onKeyDown; ações pontuais via onKeyPress.
+const HOLD_KEYS = new Set(["left", "right"]);
+for (const key of ACTION_KEYS) {
+  const bind = HOLD_KEYS.has(key) ? onKeyDown : onKeyPress;
+  bind(key, () => {
+    const action = keyToAction(key);
+    if (action?.type === "move") player.move(action.dir);
+    else if (action?.type === "jump") player.jump();
+    else if (action?.type === "shoot") player.shoot();
+  });
+}
 
 // ===== Câmera segue o jogador =====
 onUpdate(() => {

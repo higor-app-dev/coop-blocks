@@ -1,4 +1,4 @@
-import type { KaplayCtx, GameObj } from "kaplay";
+import type { KAPLAYCtx, GameObj } from "kaplay";
 
 /**
  * Cliente multiplayer via WebSocket.
@@ -19,7 +19,7 @@ export interface NetOpts {
   onPlayerLeave: (id: string) => void;
 }
 
-export function connectToServer(k: KaplayCtx, opts: NetOpts) {
+export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
   const { add, pos, rect, color, z, onUpdate, destroy } = k;
 
   let ws: WebSocket | null = null;

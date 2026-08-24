@@ -1,23 +1,52 @@
-import type { KaplayCtx } from "kaplay";
+import type { KAPLAYCtx } from "kaplay";
 
 /**
  * Geração automática de fases estilo Mario:
  * chão com buracos, plataformas suspensas e spawns de inimigos.
+ *
+ * O núcleo de geração (`generateLevelData`) é 100% puro e determinístico por
+ * seed — espelho fiel do gerador do servidor (apps/api/internal/game/level.go,
+ * porta Go deste mesmo arquivo). A feature planejada de "seed compartilhada de
+ * fase" exige que servidor e client gerem EXATAMENTE a mesma fase a partir da
+ * mesma seed; testes golden em levelgen.test.ts travam essa paridade.
+ *
+ * Divergência deliberada (alinhada ao servidor): as últimas GapWidth colunas
+ * são sempre solo sólido ("fim standable") — o client antigo podia terminar a
+ * fase em um buraco; o servidor não.
  */
+
 export interface LevelSpec {
   width: number; // tiles horizontais
   height: number; // tiles verticais
-  seed: number;
+  seed: number; // semente do PRNG mulberry32 (coerção uint32 via >>> 0)
+}
+
+export interface Tile {
+  x: number; // coluna (tile)
+  y: number; // fileira (tile; y cresce para baixo)
 }
 
 export interface LevelData {
-  tiles: Array<{ x: number; y: number }>; // tiles "solid"
-  playerSpawn: { x: number; y: number };
-  enemySpawns: Array<{ x: number; y: number }>;
+  tiles: Tile[]; // tiles "solid" (coordenadas de tile, ordenados, sem duplicatas)
+  playerSpawn: { x: number; y: number }; // pixels
+  enemySpawns: Array<{ x: number; y: number }>; // pixels
   render(): void;
 }
 
-function mulberry32(seed: number) {
+// Constantes de layout (alinhadas ao servidor Go).
+export const TILE = 48; // tamanho do tile em pixels
+export const GapPeriod = 9; // período das lacunas do chão (tx % 9)
+export const GapWidth = 2; // largura de cada lacuna, em tiles (tx%9 ∈ {0,1})
+export const PlayerSpawnX = 2; // coluna do spawn do jogador
+export const MinSpecWidth = GapPeriod; // largura mínima aceita (client usa 120)
+export const MinSpecHeight = 6; // altura mínima aceita (client usa 12)
+
+/**
+ * PRNG mulberry32 — porta exata do gerador do servidor. Duas instâncias com a
+ * mesma seed produzem a mesma sequência em [0, 1), bit-a-bit igual à do Go
+ * (verificado por testes golden).
+ */
+export function mulberry32(seed: number) {
   let a = seed >>> 0;
   return function () {
     a |= 0;
@@ -28,51 +57,107 @@ function mulberry32(seed: number) {
   };
 }
 
-export function generateLevel(k: KaplayCtx, spec: LevelSpec): LevelData {
-  const { add, pos, rect, color, area, body, z } = k;
+function validateSpec(spec: LevelSpec): void {
+  const ok =
+    Number.isInteger(spec.width) &&
+    Number.isInteger(spec.height) &&
+    spec.width >= MinSpecWidth &&
+    spec.height >= MinSpecHeight;
+  if (!ok) {
+    throw new RangeError(
+      `spec de fase inválido: width=${spec.width} height=${spec.height} (mínimo ${MinSpecWidth}x${MinSpecHeight})`
+    );
+  }
+}
+
+/**
+ * Núcleo puro da geração de fase: sem dependência de kaplay, determinístico
+ * por seed. Retorna tiles sólidos (coordenadas de tile, ordenados e sem
+ * duplicatas), spawn do jogador e spawns de inimigos (em pixels, como o
+ * cliente consome). Lança RangeError para specs fora do grid (width < 9 ou
+ * height < 6), espelhando a validação do servidor.
+ */
+export function generateLevelData(spec: LevelSpec): {
+  tiles: Tile[];
+  playerSpawn: { x: number; y: number };
+  enemySpawns: Array<{ x: number; y: number }>;
+} {
+  validateSpec(spec);
+
   const rnd = mulberry32(spec.seed);
-  const TILE = 48;
-
-  const solid: Array<{ x: number; y: number }> = [];
-  const enemySpawns: Array<{ x: number; y: number }> = [];
-
-  // Chão: linha base com buracos (gap de 2-3 tiles a cada ~10)
   const groundY = spec.height - 2;
-  for (let tx = 0; tx < spec.width; tx++) {
-    // buraco?
-    const gap = tx % 9 === 0 || tx % 9 === 1;
-    if (!gap) {
-      solid.push({ x: tx, y: groundY });
-      solid.push({ x: tx, y: groundY + 1 });
+
+  const solid = new Set<string>();
+  const tileKey = (x: number, y: number) => `${x},${y}`;
+  const addTile = (x: number, y: number) => {
+    if (x >= 0 && x < spec.width && y >= 0 && y < spec.height) {
+      solid.add(tileKey(x, y));
     }
+  };
+  const hasTile = (x: number, y: number) => solid.has(tileKey(x, y));
+
+  // 1) Chão: linha base com buracos (gap de GapWidth tiles a cada GapPeriod).
+  for (let tx = 0; tx < spec.width; tx++) {
+    if (tx % GapPeriod === 0 || tx % GapPeriod === 1) continue;
+    addTile(tx, groundY);
+    addTile(tx, groundY + 1);
   }
 
-  // Plataformas suspensas aleatórias
+  // 2) Plataformas suspensas aleatórias (mesma ordem de consumo do RNG do Go).
   for (let i = 0; i < Math.floor(spec.width / 6); i++) {
     const px = Math.floor(rnd() * (spec.width - 4)) + 2;
     const py = groundY - 2 - Math.floor(rnd() * 3);
     const len = 2 + Math.floor(rnd() * 3);
     for (let l = 0; l < len; l++) {
-      if (px + l < spec.width) solid.push({ x: px + l, y: py });
+      addTile(px + l, py);
     }
   }
 
-  // Spawns de inimigos: sobre o chão, longe do spawn do player
+  // 3) Spawns de inimigos: sobre o chão, longe do spawn do jogador.
+  const enemySpawns: Array<{ x: number; y: number }> = [];
   for (let tx = 12; tx < spec.width - 1; tx += 5 + Math.floor(rnd() * 4)) {
-    const onGround = solid.some((t) => t.x === tx && t.y === groundY);
-    if (onGround) {
+    if (hasTile(tx, groundY)) {
       enemySpawns.push({ x: tx * TILE, y: groundY * TILE - 30 });
     }
   }
 
-  const playerSpawn = { x: 2 * TILE, y: groundY * TILE - 42 };
+  // 4) Garantia de "fim standable" (alinhada ao servidor Go): as últimas
+  //    GapWidth colunas são sempre solo sólido.
+  for (let tx = spec.width - GapWidth; tx < spec.width; tx++) {
+    if (!hasTile(tx, groundY)) {
+      addTile(tx, groundY);
+      addTile(tx, groundY + 1);
+    }
+  }
+
+  // Saída canônica: tiles ordenados e sem duplicatas (mesma forma do Go).
+  const tiles: Tile[] = [...solid]
+    .map((key) => {
+      const [x, y] = key.split(",").map(Number);
+      return { x, y };
+    })
+    .sort((a, b) => a.x - b.x || a.y - b.y);
+
+  const playerSpawn = { x: PlayerSpawnX * TILE, y: groundY * TILE - 42 };
+
+  return { tiles, playerSpawn, enemySpawns };
+}
+
+/**
+ * Gera a fase e devolve o objeto com `render()`, que desenha os tiles no
+ * contexto kaplay. Wrapper fino sobre `generateLevelData` (a geração em si é
+ * pura e testável sem kaplay).
+ */
+export function generateLevel(k: KAPLAYCtx, spec: LevelSpec): LevelData {
+  const { add, pos, rect, color, area, body, z } = k;
+  const { tiles, playerSpawn, enemySpawns } = generateLevelData(spec);
 
   return {
-    tiles: solid,
+    tiles,
     playerSpawn,
     enemySpawns,
     render() {
-      for (const t of solid) {
+      for (const t of tiles) {
         add([
           "solid",
           pos(t.x * TILE, t.y * TILE),

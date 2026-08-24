@@ -43,16 +43,11 @@ func TestCoinSpawnForLevelEspelhaClient(t *testing.T) {
 		t.Fatalf("GenerateLevel: %v", err)
 	}
 
-	// Esperado: mesmo critério do client (main.ts) — tile sólido da fileira
-	// do chão com x >= 6 e x % 4 == 0.
-	want := 0
-	for _, tile := range l.Tiles {
-		if tile.Y == l.GroundY && tile.X >= CoinStartCol && tile.X%CoinColumnStep == 0 {
-			want++
-		}
-	}
+	// Esperado: uma moeda por posição de Level.CoinSpawns (chão + topos de
+	// plataforma decididos pelo gerador). A fase seed 1 precisa ter moedas.
+	want := len(l.CoinSpawns)
 	if want == 0 {
-		t.Fatalf("fase seed 1 não tem nenhuma coluna de moeda esperada")
+		t.Fatalf("fase seed 1 não tem moedas")
 	}
 
 	m := NewCoinManagerDefault()
@@ -68,10 +63,23 @@ func TestCoinSpawnForLevelEspelhaClient(t *testing.T) {
 		t.Fatalf("snapshot len = %d, want %d", len(snap), want)
 	}
 
-	// Cada moeda: posição espelhada do client e coluna sólida (nunca dentro
-	// de parede nem sobre lacuna). ID único.
+	// Posições esperadas (uma por CoinSpawns): centro da coluna e
+	// CoinFloatHeight acima do topo do tile, menos metade da hitbox (top-left).
+	expected := make(map[[2]int]bool, want)
+	for _, t := range l.CoinSpawns {
+		expected[[2]int{
+			t.X*TileSize + TileSize/2 - CoinDefaultWidth/2,
+			t.Y*TileSize - CoinFloatHeight - CoinDefaultHeight/2,
+		}] = true
+	}
+	if len(expected) != want {
+		t.Fatalf("posições esperadas com colisão: %d de %d", len(expected), want)
+	}
+
+	// Cada moeda: posição dentro do conjunto esperado, tile sólido abaixo e
+	// espaço livre acima (nunca dentro de parede nem sobre lacuna). ID único
+	// e snapshot ordenado.
 	seen := map[string]bool{}
-	groundTop := float64(l.GroundY*TileSize) - CoinFloatHeight
 	for i, cs := range snap {
 		if seen[cs.ID] {
 			t.Fatalf("ID %q duplicado no snapshot", cs.ID)
@@ -80,17 +88,17 @@ func TestCoinSpawnForLevelEspelhaClient(t *testing.T) {
 		if i > 0 && !(snap[i-1].ID < cs.ID) {
 			t.Errorf("snapshot fora de ordem em %d (%q >= %q)", i, snap[i-1].ID, cs.ID)
 		}
-		// top-left = centro (x*TILE + TILE/2, y*TILE - 30) menos metade da hitbox
-		wantX := int(float64(cs.X/TileSize)*TileSize+TileSize/2.0) - CoinDefaultWidth/2
-		if cs.X != wantX {
-			t.Errorf("moeda %s X = %d, want %d", cs.ID, cs.X, wantX)
+		if !expected[[2]int{cs.X, cs.Y}] {
+			t.Errorf("moeda %s em (%d,%d) fora do conjunto esperado de CoinSpawns", cs.ID, cs.X, cs.Y)
 		}
-		if cs.Y != int(groundTop-CoinDefaultHeight/2) {
-			t.Errorf("moeda %s Y = %d, want %d", cs.ID, cs.Y, int(groundTop-CoinDefaultHeight/2))
+		// tile da moeda (coluna do centro, fileira do topo do tile de apoio)
+		col := (cs.X + CoinDefaultWidth/2 - TileSize/2) / TileSize
+		row := (cs.Y + CoinDefaultHeight/2 + CoinFloatHeight) / TileSize
+		if !l.Solid(col, row) {
+			t.Errorf("moeda %s em coluna %d sem tile sólido abaixo (dentro de parede/lacuna)", cs.ID, col)
 		}
-		col := cs.X / TileSize
-		if !l.Solid(col, l.GroundY) {
-			t.Errorf("moeda %s em coluna %d sem tile sólido (dentro de parede/lacuna)", cs.ID, col)
+		if l.Solid(col, row-1) {
+			t.Errorf("moeda %s enterrada (tile sólido acima em (%d,%d))", cs.ID, col, row-1)
 		}
 	}
 

@@ -13,10 +13,12 @@
 //   - SEM caixa comum: não existe pool compartilhado de moedas do time —
 //     cada jogador tem o seu contador individual.
 //
-// O posicionamento espelha o client (apps/web/src/main.ts): fileira de moedas
-// sobre o chão, uma a cada 4 colunas sólidas a partir de x=6, flutuando 30 px
-// acima do topo do tile de solo. Tudo é determinístico: mesma fase (mesmo
-// grid) produz exatamente o mesmo conjunto de moedas.
+// O posicionamento é decidido pelo gerador de fase (level.go, Level.CoinSpawns:
+// chão + topos expostos de plataforma, scatter seed-dependente) — este
+// gerenciador apenas registra cada moeda com ID único e converte tile→pixels:
+// centro da coluna, flutuando CoinFloatHeight px acima do topo do tile.
+// Tudo é determinístico: mesma fase (mesmo grid) produz exatamente o mesmo
+// conjunto de moedas.
 package game
 
 import (
@@ -35,9 +37,11 @@ const (
 	// CoinFloatHeight: distância do CENTRO da moeda ao topo do tile de solo
 	// (client: pos(t.x*TILE + TILE/2, t.y*TILE - 30)).
 	CoinFloatHeight = 30.0
-	// CoinStartCol: primeira coluna de moedas (client: t.x >= 6).
+	// CoinStartCol: primeira coluna de moedas do chão (client: t.x >= 6).
+	// Usado pelo gerador de fase (level.go, Level.CoinSpawns).
 	CoinStartCol = 6
-	// CoinColumnStep: moedas a cada N colunas sólidas (client: t.x % 4 === 0).
+	// CoinColumnStep: moedas a cada N colunas (client: t.x % 4 === 0).
+	// Usado pelo gerador de fase (level.go) para chão e plataformas.
 	CoinColumnStep = 4
 )
 
@@ -155,26 +159,22 @@ func (m *CoinManager) spawnLocked(x, y float64) *Coin {
 	return c
 }
 
-// SpawnForLevel espalha moedas sobre o chão da fase (espelho do client):
-// tile sólido da fileira do chão (l.GroundY) com x >= CoinStartCol e
-// x % CoinColumnStep == 0, flutuando CoinFloatHeight px acima do topo do
-// tile. Só cria moeda onde existe tile sólido (nunca dentro de parede nem
-// sobre lacuna). Determinístico: depende apenas do grid canônico de l.Tiles.
-// Devolve quantas moedas foram criadas.
+// SpawnForLevel registra as moedas da fase no gerenciador: uma moeda por
+// posição de Level.CoinSpawns (chão + topos de plataforma decididos pelo
+// gerador em level.go — nunca dentro de parede). Cada moeda ganha um ID
+// único sequencial (c1, c2, …) e flutua CoinFloatHeight px acima do topo do
+// tile, centralizada na coluna. Determinístico: a mesma fase (mesmo grid)
+// produz exatamente o mesmo conjunto de moedas. Devolve quantas moedas
+// foram criadas.
 func (m *CoinManager) SpawnForLevel(l *Level) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	spawned := 0
-	for _, t := range l.Tiles {
-		if t.Y != l.GroundY || t.X < CoinStartCol || t.X%CoinColumnStep != 0 {
-			continue
-		}
+	for _, t := range l.CoinSpawns {
 		cx := float64(t.X*TileSize) + TileSize/2.0
 		cy := float64(t.Y*TileSize) - CoinFloatHeight
 		m.spawnLocked(cx-m.cfg.Width/2, cy-m.cfg.Height/2)
-		spawned++
 	}
-	return spawned
+	return len(l.CoinSpawns)
 }
 
 // Step detecta sobreposição AABB entre jogadores vivos e moedas. Cada moeda

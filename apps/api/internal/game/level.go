@@ -79,14 +79,19 @@ type Tile struct {
 	Y int
 }
 
-// Level é uma fase gerada: tiles sólidos, spawn do jogador e spawns de
-// inimigos em coordenadas de tile (multiplicar por TileSize para pixels).
+// Level é uma fase gerada: tiles sólidos, spawn do jogador, spawns de
+// inimigos e moedas em coordenadas de tile (multiplicar por TileSize para
+// pixels).
 type Level struct {
 	Spec        LevelSpec
 	GroundY     int // fileira do topo do chão (spec.Height - 2)
 	Tiles       []Tile
 	PlayerSpawn Tile
 	EnemySpawns []Tile
+	// CoinSpawns são as posições de moedas da fase (chão + topos expostos
+	// de plataforma), decididas pelo gerador — o CoinManager (coins.go)
+	// registra cada uma com ID único e converte tile→pixels no spawn.
+	CoinSpawns []Tile
 
 	solid map[Tile]bool // índice interno de Solid() — populado por GenerateLevel
 }
@@ -203,6 +208,41 @@ func GenerateLevel(spec LevelSpec) (Level, error) {
 		}
 	}
 
+	// 5) Moedas: posições determinísticas da fase — o gerador decide ONDE as
+	//    moedas ficam; o CoinManager (coins.go, SpawnForLevel) registra cada
+	//    uma com ID único e converte tile→pixels no spawn. Regras:
+	//      - chão: coluna sólida da fileira do chão com x >= CoinStartCol e
+	//        x % CoinColumnStep == 0 — mesmo critério do client (main.ts),
+	//        garantia de moedas coletáveis andando em TODA fase;
+	//      - plataformas: topo exposto (tile sólido acima do chão com espaço
+	//        livre em cima — nunca enterrada em parede), selecionado com um
+	//        deslocamento sorteado da seed (coinOffset): a mesma coluna de
+	//        plataforma pode ter moeda numa fase e não em outra — scatter
+	//        seed-dependente;
+	//      - cada moeda flutua CoinFloatHeight px acima do topo do tile,
+	//        alcançável andando (chão) ou pulando na plataforma.
+	var coinSpawns []Tile
+	coinRnd := newMulberry32(spec.Seed ^ 0x9E3779B9) // stream própria — não altera a ordem de consumo do layout
+	coinOffset := int(math.Floor(coinRnd() * CoinColumnStep))
+
+	// a) Chão: fileira do chão, mesmo critério do client (paridade exata).
+	for tx := 0; tx < spec.Width; tx++ {
+		if tx >= CoinStartCol && tx%CoinColumnStep == 0 && hasTile(tx, groundY) {
+			coinSpawns = append(coinSpawns, Tile{X: tx, Y: groundY})
+		}
+	}
+
+	// b) Plataformas: superfícies expostas acima do chão (tile sólido sem
+	//    sólido em cima), com o passo deslocado pela seed.
+	for t := range solid {
+		if t.Y >= groundY || hasTile(t.X, t.Y-1) {
+			continue // chão já coberto em (a); tile com sólido em cima = enterrado
+		}
+		if (t.X+coinOffset)%CoinColumnStep == 0 {
+			coinSpawns = append(coinSpawns, t)
+		}
+	}
+
 	// Saída canônica: tiles ordenados e sem duplicatas.
 	tiles := make([]Tile, 0, len(solid))
 	for t := range solid {
@@ -220,7 +260,14 @@ func GenerateLevel(spec LevelSpec) (Level, error) {
 		}
 		return enemySpawns[i].Y < enemySpawns[j].Y
 	})
+	sort.Slice(coinSpawns, func(i, j int) bool {
+		if coinSpawns[i].X != coinSpawns[j].X {
+			return coinSpawns[i].X < coinSpawns[j].X
+		}
+		return coinSpawns[i].Y < coinSpawns[j].Y
+	})
 	l.Tiles = tiles
+	l.CoinSpawns = coinSpawns
 
 	return l, nil
 }
@@ -235,18 +282,22 @@ func (l *Level) Solid(x, y int) bool {
 }
 
 // Signature devolve uma representação canônica e determinística da fase
-// (tiles ordenados + spawns). Duas fases têm a mesma Signature sse forem
-// idênticas — útil para comparar fases por seed e detectar divergências
-// client/servidor.
+// (tiles ordenados + spawns de inimigos + moedas). Duas fases têm a mesma
+// Signature sse forem idênticas — útil para comparar fases por seed e
+// detectar divergências client/servidor. O formato depende de CoinSpawns
+// estar ordenado (saída canônica de GenerateLevel).
 func (l *Level) Signature() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "w=%d h=%d ground=%d spawn=%d,%d enemies=%d",
-		l.Spec.Width, l.Spec.Height, l.GroundY, l.PlayerSpawn.X, l.PlayerSpawn.Y, len(l.EnemySpawns))
+	fmt.Fprintf(&b, "w=%d h=%d ground=%d spawn=%d,%d enemies=%d coins=%d",
+		l.Spec.Width, l.Spec.Height, l.GroundY, l.PlayerSpawn.X, l.PlayerSpawn.Y, len(l.EnemySpawns), len(l.CoinSpawns))
 	for _, t := range l.Tiles {
 		fmt.Fprintf(&b, ";%d,%d", t.X, t.Y)
 	}
 	for _, e := range l.EnemySpawns {
 		fmt.Fprintf(&b, "|%d,%d", e.X, e.Y)
+	}
+	for _, c := range l.CoinSpawns {
+		fmt.Fprintf(&b, "~%d,%d", c.X, c.Y)
 	}
 	return b.String()
 }

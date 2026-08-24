@@ -311,3 +311,163 @@ func TestLevelFinished(t *testing.T) {
 		})
 	}
 }
+
+// TestLevelCoinSpawnsPresentesEmTodaFase é o aceite central da task: TODA
+// fase gerada carrega um conjunto de moedas coletáveis (a regra do chão
+// garante pelo menos uma). O teste reconstrói o conjunto exato esperado pela
+// regra do gerador (chão + topos expostos de plataforma com o passo
+// deslocado pela seed) e confere: (a) igualdade de conjuntos — nem falta nem
+// sobra moeda; (b) toda moeda sobre tile sólido com espaço livre acima —
+// nunca enterrada em parede nem sobre lacuna; (c) nenhuma moeda abaixo do
+// chão.
+func TestLevelCoinSpawnsPresentesEmTodaFase(t *testing.T) {
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("%s_seed_%d", spec.name, seed)
+			t.Run(name, func(t *testing.T) {
+				l := genLevel(t, spec.width, spec.height, seed)
+
+				coinOffset := int(math.Floor(newMulberry32(seed^0x9E3779B9)() * CoinColumnStep))
+				want := map[Tile]bool{}
+				// a) chão: fileira do chão, regra do client
+				for tx := 0; tx < spec.width; tx++ {
+					if tx >= CoinStartCol && tx%CoinColumnStep == 0 && l.Solid(tx, l.GroundY) {
+						want[Tile{X: tx, Y: l.GroundY}] = true
+					}
+				}
+				// b) plataformas: topo exposto acima do chão, passo deslocado
+				for ty := 0; ty < l.GroundY; ty++ {
+					for tx := 0; tx < spec.width; tx++ {
+						if l.Solid(tx, ty) && !l.Solid(tx, ty-1) && (tx+coinOffset)%CoinColumnStep == 0 {
+							want[Tile{X: tx, Y: ty}] = true
+						}
+					}
+				}
+				if len(want) == 0 {
+					t.Fatal("fase sem moedas esperadas")
+				}
+
+				got := map[Tile]bool{}
+				for _, c := range l.CoinSpawns {
+					got[c] = true
+					if c.Y > l.GroundY {
+						t.Errorf("moeda %+v abaixo do chão (groundY=%d)", c, l.GroundY)
+					}
+					if !l.Solid(c.X, c.Y) {
+						t.Errorf("moeda %+v sem tile sólido abaixo", c)
+					}
+					if l.Solid(c.X, c.Y-1) {
+						t.Errorf("moeda %+v enterrada (tile sólido acima)", c)
+					}
+				}
+				if len(got) != len(want) {
+					t.Errorf("seed %d: %d moedas geradas, want %d", seed, len(got), len(want))
+				}
+				for c := range want {
+					if !got[c] {
+						t.Errorf("seed %d: faltou moeda em %+v", seed, c)
+					}
+				}
+				for c := range got {
+					if !want[c] {
+						t.Errorf("seed %d: moeda extra em %+v", seed, c)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestLevelCoinSpawnsDeterminismo verifica que a mesma seed produz exatamente
+// o mesmo conjunto de moedas (mesmas posições, mesma ordem canônica).
+func TestLevelCoinSpawnsDeterminismo(t *testing.T) {
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("%s_seed_%d", spec.name, seed)
+			t.Run(name, func(t *testing.T) {
+				l1 := genLevel(t, spec.width, spec.height, seed)
+				l2 := genLevel(t, spec.width, spec.height, seed)
+				if len(l1.CoinSpawns) != len(l2.CoinSpawns) {
+					t.Fatalf("len(CoinSpawns) = %d vs %d", len(l1.CoinSpawns), len(l2.CoinSpawns))
+				}
+				for i := range l1.CoinSpawns {
+					if l1.CoinSpawns[i] != l2.CoinSpawns[i] {
+						t.Errorf("moeda %d: %+v vs %+v", i, l1.CoinSpawns[i], l2.CoinSpawns[i])
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestLevelCoinSpawnsRegraChao trava a paridade do chão com o client
+// (main.ts): fileira do chão (GroundY), colunas sólidas com x >= CoinStartCol
+// e x % CoinColumnStep == 0 — exatamente esse conjunto, nem mais nem menos.
+func TestLevelCoinSpawnsRegraChao(t *testing.T) {
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			l := genLevel(t, spec.width, spec.height, seed)
+			want := map[Tile]bool{}
+			for tx := 0; tx < spec.width; tx++ {
+				if l.Solid(tx, l.GroundY) && tx >= CoinStartCol && tx%CoinColumnStep == 0 {
+					want[Tile{X: tx, Y: l.GroundY}] = true
+				}
+			}
+			got := map[Tile]bool{}
+			for _, c := range l.CoinSpawns {
+				if c.Y == l.GroundY {
+					got[c] = true
+				}
+			}
+			if len(got) != len(want) {
+				t.Errorf("seed %d: %d moedas no chão, want %d", seed, len(got), len(want))
+			}
+			for c := range want {
+				if !got[c] {
+					t.Errorf("seed %d: faltou moeda de chão em %+v", seed, c)
+				}
+			}
+		}
+	}
+}
+
+// TestLevelCoinSpawnsScatterSeedDependente verifica que o scatter de moedas é
+// seed-dependente (fases diferentes → conjuntos de plataforma diferentes) e
+// esparso: na mesma fileira, colunas separadas por múltiplos de
+// CoinColumnStep (nunca duas moedas coladas na mesma altura).
+func TestLevelCoinSpawnsScatterSeedDependente(t *testing.T) {
+	// Fases distintas produzem conjuntos distintos (spec do client, onde há
+	// plataformas suficientes para o scatter variar). CoinSpawns já sai
+	// ordenado de GenerateLevel — fmt.Sprint é uma chave estável.
+	sigs := map[string]uint32{}
+	for _, seed := range testSeeds {
+		l := genLevel(t, 120, 12, seed)
+		key := fmt.Sprint(l.CoinSpawns)
+		sigs[key] = seed
+	}
+	if len(sigs) < 3 {
+		t.Errorf("apenas %d conjuntos de moedas distintos entre %d seeds (esperava scatter variado)",
+			len(sigs), len(testSeeds))
+	}
+
+	// Esparsidade por fileira: espaçamento múltiplo de CoinColumnStep entre
+	// moedas da mesma altura (chão e cada fileira de plataforma).
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			l := genLevel(t, spec.width, spec.height, seed)
+			byRow := map[int][]int{}
+			for _, c := range l.CoinSpawns {
+				byRow[c.Y] = append(byRow[c.Y], c.X)
+			}
+			for row, xs := range byRow {
+				sort.Ints(xs)
+				for i := 1; i < len(xs); i++ {
+					if (xs[i]-xs[i-1])%CoinColumnStep != 0 {
+						t.Errorf("seed %d: moedas da fileira %d em %d e %d violam o passo %d",
+							seed, row, xs[i-1], xs[i], CoinColumnStep)
+					}
+				}
+			}
+		}
+	}
+}

@@ -350,6 +350,8 @@ interface FakeObj {
   children: unknown[][];
   add: (comps: unknown[]) => void;
   exists: () => boolean;
+  /** Espelho do GameObj.paused do kaplay (default undefined = não-pausado). */
+  paused?: boolean;
 }
 
 function makeFakeKaplay() {
@@ -456,6 +458,26 @@ describe("spawnEnemy — wrapper kaplay (engine fake)", () => {
     });
     expect(updates).toHaveLength(1);
     const x0 = e.pos.x;
+    for (let i = 0; i < 60; i++) updates[0](); // 1 s de patrulha
+    expect(e.pos.x).toBeGreaterThan(x0);
+  });
+
+  it("paused=true congela a IA (loja entre fases pausa o mundo)", () => {
+    const { k, updates } = makeFakeKaplay();
+    const e = spawnEnemy(k as never, {
+      pos: spawnAt(2),
+      type: "andador",
+      phase: 1,
+      id: "e1",
+      world,
+      players: () => [],
+    });
+    expect(updates).toHaveLength(1);
+    const x0 = e.pos.x;
+    e.paused = true;
+    for (let i = 0; i < 60; i++) updates[0](); // 1 s com o mundo pausado
+    expect(e.pos.x).toBe(x0);
+    e.paused = false;
     for (let i = 0; i < 60; i++) updates[0](); // 1 s de patrulha
     expect(e.pos.x).toBeGreaterThan(x0);
   });

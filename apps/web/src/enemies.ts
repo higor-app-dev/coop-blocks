@@ -480,6 +480,12 @@ export function spawnEnemy(k: KAPLAYCtx, opts: SpawnEnemyOpts): EnemyObject {
 
   const shots: EnemyShot[] = [];
   onUpdate(() => {
+    // O onUpdate aqui é GLOBAL (k.onUpdate, não e.onUpdate) — o kaplay só
+    // gatea callbacks por objeto quando registrados no objeto. Sem esta
+    // guarda, obj.paused = true (loja entre fases pausa o mundo) não congela
+    // a IA do inimigo. Respeitar o próprio paused mantém o mundo congelado
+    // durante a loja, como o servidor faz (sem dano/tiro/coleta no tick).
+    if (e.paused) return;
     shots.length = 0;
     stepEnemy(sim, opts.world, opts.players(), k.dt(), shots);
     e.pos = vec2(sim.x, sim.y);

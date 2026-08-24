@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BASE_MAX_HP,
+  FIRE_COOLDOWN_BASE_MS,
   UPGRADE_CATALOG,
+  applyUpgrade,
+  buyLocal,
   canBuy,
   createShop,
+  fireCooldownMs,
   isMaxed,
   readyCount,
   upgradeLevel,
   type BuyReceipt,
   type ShopPhaseState,
+  type ShopStats,
 } from "./shop";
 
 // ===== Fake DOM mínimo (vitest roda em node, sem jsdom) =====
@@ -190,6 +195,106 @@ describe("readyCount", () => {
     expect(readyCount(shopState({ ready: { alice: true, bob: false } }))).toBe(1);
     expect(readyCount(shopState({ ready: { alice: true, bob: true } }))).toBe(2);
     expect(readyCount(shopState())).toBe(0);
+  });
+});
+
+// ===== Aplicação de upgrades (espelho do servidor) =====
+
+describe("applyUpgrade — aplica UM nível nas stats efetivas", () => {
+  const base: ShopStats = { maxHp: BASE_MAX_HP, fireRate: 1, shield: 0 };
+
+  it("max_hp soma +25 HP ao teto", () => {
+    expect(applyUpgrade(base, "max_hp")).toEqual({ maxHp: 125, fireRate: 1, shield: 0 });
+    expect(applyUpgrade({ ...base, maxHp: 125 }, "max_hp")).toEqual({ maxHp: 150, fireRate: 1, shield: 0 });
+  });
+
+  it("fire_rate soma +0.2 ao multiplicador de cadência", () => {
+    expect(applyUpgrade(base, "fire_rate").fireRate).toBeCloseTo(1.2);
+    expect(applyUpgrade({ ...base, fireRate: 1.4 }, "fire_rate").fireRate).toBeCloseTo(1.6);
+  });
+
+  it("shield soma +1 carga", () => {
+    expect(applyUpgrade(base, "shield")).toEqual({ maxHp: 100, fireRate: 1, shield: 1 });
+    expect(applyUpgrade({ ...base, shield: 1 }, "shield")).toEqual({ maxHp: 100, fireRate: 1, shield: 2 });
+  });
+
+  it("não muta o objeto original (imutável)", () => {
+    const before = { ...base };
+    applyUpgrade(base, "max_hp");
+    expect(base).toEqual(before);
+  });
+});
+
+describe("fireCooldownMs — espelho do cooldown do servidor", () => {
+  it("fireRate 1 (sem upgrade) mantém o cooldown base", () => {
+    expect(fireCooldownMs(1)).toBe(FIRE_COOLDOWN_BASE_MS);
+  });
+
+  it("fireRate maior encurta o cooldown proporcionalmente", () => {
+    expect(fireCooldownMs(1.2)).toBeCloseTo(FIRE_COOLDOWN_BASE_MS / 1.2);
+    expect(fireCooldownMs(1.6)).toBeCloseTo(FIRE_COOLDOWN_BASE_MS / 1.6);
+  });
+
+  it("nunca divide por zero/negativo", () => {
+    expect(fireCooldownMs(0)).toBe(FIRE_COOLDOWN_BASE_MS * 100);
+    expect(fireCooldownMs(-1)).toBe(FIRE_COOLDOWN_BASE_MS * 100);
+  });
+});
+
+// ===== Compra local (singleplayer offline) =====
+
+describe("buyLocal — compra offline valida, debita e aplica", () => {
+  const base: ShopStats = { maxHp: BASE_MAX_HP, fireRate: 1, shield: 0 };
+
+  it("compra com saldo suficiente: debita o caixa e aplica o upgrade", () => {
+    const res = buyLocal(120, base, "max_hp");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.wallet).toBe(70); // 120 - 50
+    expect(res.stats.maxHp).toBe(125);
+    expect(res.receipt).toMatchObject({ upgrade: "max_hp", level: 1, cost: 50, coins: 70 });
+    expect(res.receipt.stats.maxHp).toBe(125);
+  });
+
+  it("cada compra debita o custo do catálogo (50/40/30)", () => {
+    const hp = buyLocal(200, base, "max_hp");
+    const fr = buyLocal(200, base, "fire_rate");
+    const sh = buyLocal(200, base, "shield");
+    expect(hp.ok && hp.wallet).toBe(150);
+    expect(fr.ok && fr.wallet).toBe(160);
+    expect(sh.ok && sh.wallet).toBe(170);
+  });
+
+  it("rejeita com moedas insuficientes SEM debitar nem aplicar", () => {
+    const res = buyLocal(49, base, "max_hp");
+    expect(res).toEqual({ ok: false, error: "moedas insuficientes" });
+  });
+
+  it("rejeita no nível máximo (upgrade no nível máximo)", () => {
+    const maxed: ShopStats = { maxHp: 175, fireRate: 1, shield: 0 };
+    expect(buyLocal(999, maxed, "max_hp")).toEqual({ ok: false, error: "upgrade no nível máximo" });
+  });
+
+  it("rejeita id de upgrade desconhecido", () => {
+    expect(buyLocal(999, base, "teleporte")).toEqual({ ok: false, error: "upgrade inválido" });
+  });
+
+  it("nível do comprovante reflete o nível PÓS-compra", () => {
+    const lvl1 = buyLocal(120, base, "shield");
+    expect(lvl1.ok && lvl1.receipt.level).toBe(1);
+    const lvl2 = buyLocal(120, { ...base, shield: 1 }, "shield");
+    expect(lvl2.ok && lvl2.receipt.level).toBe(2);
+    expect(lvl2.ok && lvl2.receipt.stats.shield).toBe(2);
+  });
+
+  it("compra cumulativa no fim do caixa: 2 upgrades sucessivos debitam na ordem", () => {
+    const first = buyLocal(120, base, "fire_rate");
+    if (!first.ok) return;
+    const second = buyLocal(first.wallet, first.stats, "shield");
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.wallet).toBe(120 - 40 - 30); // 50
+    expect(second.stats).toEqual({ maxHp: 100, fireRate: 1.2, shield: 1 });
   });
 });
 

@@ -140,6 +140,66 @@ export function canBuy(coins: number, stats: ShopStats, def: UpgradeDef): boolea
   return coins >= def.cost && !isMaxed(stats, def);
 }
 
+/**
+ * Aplica UM nível de upgrade nas stats efetivas — espelho das fórmulas do
+ * servidor (shop.go): max_hp soma MAX_HP_PER_LEVEL ao teto, fire_rate soma
+ * FIRE_RATE_PER_LEVEL ao multiplicador de cadência, shield soma 1 carga.
+ * Retorna NOVO objeto (imutável) — o chamador persiste o resultado.
+ */
+export function applyUpgrade(stats: ShopStats, id: UpgradeID): ShopStats {
+  switch (id) {
+    case "max_hp":
+      return { ...stats, maxHp: stats.maxHp + MAX_HP_PER_LEVEL };
+    case "fire_rate":
+      return { ...stats, fireRate: stats.fireRate + FIRE_RATE_PER_LEVEL };
+    case "shield":
+      return { ...stats, shield: stats.shield + 1 };
+  }
+}
+
+/**
+ * Cooldown efetivo entre tiros em ms — espelho do servidor (main.go:
+ * cooldown base 150ms / multiplicador fire_rate). Com fireRate 1.2 → 125ms,
+ * 1.6 → ~94ms. Usado no singleplayer local (offline); online o servidor
+ * valida o cooldown autoritativamente.
+ */
+export const FIRE_COOLDOWN_BASE_MS = 150;
+export function fireCooldownMs(fireRate: number): number {
+  return FIRE_COOLDOWN_BASE_MS / Math.max(0.01, fireRate);
+}
+
+/** Resultado de uma compra local (offline): sucesso com comprovante ou erro. */
+export type LocalBuyResult =
+  | { ok: true; wallet: number; stats: ShopStats; receipt: BuyReceipt }
+  | { ok: false; error: string };
+
+/**
+ * Compra local (singleplayer offline): valida como o servidor
+ * (upgrade conhecido, não no nível máximo, saldo ≥ custo), debita o caixa
+ * individual e aplica o upgrade nas stats da run. Erros com a MESMA semântica
+ * do servidor (ErrInvalidUpgrade / ErrUpgradeMaxed / ErrInsufficientCoins).
+ */
+export function buyLocal(wallet: number, stats: ShopStats, upgrade: string): LocalBuyResult {
+  const def = UPGRADE_CATALOG.find((u) => u.id === upgrade);
+  if (!def) return { ok: false, error: "upgrade inválido" };
+  if (isMaxed(stats, def)) return { ok: false, error: "upgrade no nível máximo" };
+  if (wallet < def.cost) return { ok: false, error: "moedas insuficientes" };
+  const nextStats = applyUpgrade(stats, def.id);
+  const nextWallet = wallet - def.cost;
+  return {
+    ok: true,
+    wallet: nextWallet,
+    stats: nextStats,
+    receipt: {
+      upgrade: def.id,
+      level: upgradeLevel(nextStats, def.id),
+      cost: def.cost,
+      coins: nextWallet,
+      stats: nextStats,
+    },
+  };
+}
+
 /** Conta quantos jogadores da loja já confirmaram 'pronto'. */
 export function readyCount(state: ShopPhaseState): number {
   return state.players.filter((p) => state.ready[p.id]).length;

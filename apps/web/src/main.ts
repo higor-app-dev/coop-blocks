@@ -22,7 +22,7 @@ import {
   type HudState,
 } from "./hud";
 import { createParticles } from "./particles";
-import { createShop } from "./shop";
+import { buyLocal, createShop, fireCooldownMs, type ShopStats } from "./shop";
 import {
   playCoin,
   playDamage,
@@ -219,6 +219,16 @@ const bossLayer = createBossLayer(k);
   get bullets() {
     return k.get("bullet").map((b) => ({ x: b.pos.x, y: b.pos.y, vel: b.vel }));
   },
+  // DEBUG — stats da run e caixa individual (loja offline) para o smoke test.
+  get runStats() {
+    return localStats;
+  },
+  get wallet() {
+    return coinWallet;
+  },
+  get phase() {
+    return currentLevelNumber;
+  },
   hurt: (n: number) => hurtLocalPlayer(n),
   dropAt: (x: number, y: number) => dropCoins(x, y),
   shoot: () => player.shoot(),
@@ -357,6 +367,12 @@ let teamCoins = 0;
 // buildWorld; na transição de fase o caixa recebe o total da fase ANTES do
 // rebuild. Morte/reset da fase NÃO mexe no caixa (só no contador da fase).
 let coinWallet = 0;
+// Stats da run no singleplayer local (offline): upgrades comprados na loja
+// local. São a fonte autoritativa OFFLINE — espelho do que o servidor
+// manteria (NetRunPlayer.stats no multiplayer). maxHp vira o teto de vida do
+// buildWorld, fireRate acelera o cooldown de tiro local e shield absorve 1
+// hit (hurtLocalPlayer consome a carga).
+let localStats: ShopStats = { maxHp: MAX_HP, fireRate: 1, shield: 0 };
 // Transição de fase em andamento — impede disparo duplicado do fim de mapa.
 let transitioning = false;
 buildWorld(1, MAX_HP);
@@ -377,14 +393,78 @@ const shieldBubble = add([
 shieldBubble.hidden = true;
 
 // ===== Loja entre fases (overlay) =====
-// Aparece quando o servidor abre a loja (phase="shop"); comprar dispara
-// shop_buy, confirmar dispara shop_ready. O overlay some quando o broadcast
-// de fase volta para "playing" (todos prontos) — aí o buildWorld reconstrói
-// o próximo mapa.
+// Aparece quando a loja abre — no multiplayer quando o servidor broadcasta
+// phase="shop"; no singleplayer local (offline) quando o jogador cruza o fim
+// do mapa. Comprar dispara shop_buy (servidor) ou a compra local (offline);
+// confirmar dispara shop_ready (servidor) ou avança a fase local. O overlay
+// some quando a fase volta para "playing" — aí o buildWorld reconstrói o
+// próximo mapa.
 const shop = createShop({
-  onBuy: (upgrade) => server.sendShopBuy(upgrade),
-  onReady: () => server.sendShopReady(),
+  onBuy: (upgrade) => {
+    if (phaseState) {
+      // Multiplayer: o servidor valida, debita e responde shop_buy_result.
+      server.sendShopBuy(upgrade);
+      return;
+    }
+    // Singleplayer local (offline): a loja é local — valida, debita o caixa
+    // individual e aplica o upgrade na run; o comprovante atualiza a tela.
+    const res = buyLocal(coinWallet, localStats, upgrade);
+    if (res.ok) {
+      coinWallet = res.wallet;
+      localStats = res.stats;
+      shop.applyBuyResult(res.receipt);
+      playUI();
+    } else {
+      shop.showError(res.error);
+    }
+  },
+  onReady: () => {
+    if (phaseState) {
+      server.sendShopReady();
+      return;
+    }
+    advanceOfflinePhase();
+  },
 });
+
+// Pausa/retoma o mundo no singleplayer local (offline): o servidor pausa o
+// mundo durante a loja (sem dano/tiro/coleta no tick) — aqui a loja local
+// congela o player, inimigos e projéteis para o jogador não morrer/mover
+// atrás do overlay. Objetos novos (próximo buildWorld) nascem não-pausados.
+function setWorldPaused(paused: boolean): void {
+  for (const obj of k.get("enemy")) obj.paused = paused;
+  for (const obj of k.get("hostile")) obj.paused = paused;
+  for (const obj of k.get("bullet")) obj.paused = paused;
+  if (player.exists()) player.paused = paused;
+}
+
+// Abre a loja local (offline): alimenta o overlay com um estado sintético de
+// fase (caixa individual + stats da run) — o mesmo wire do multiplayer, com
+// o jogador local como único participante.
+function openLocalShop(): void {
+  shop.update(
+    {
+      phase: "shop",
+      number: currentLevelNumber,
+      ready: { local: false },
+      players: [{ id: "local", coins: coinWallet, stats: localStats }],
+    },
+    "local"
+  );
+}
+
+// Confirmação de 'pronto' na loja local (offline): fecha o overlay, avança a
+// fase (nova seed/dificuldade) e reconstrói o mundo com o teto de vida
+// efetivo (upgrades de max_hp comprados na run).
+function advanceOfflinePhase(): void {
+  shop.update(
+    { phase: "playing", number: currentLevelNumber + 1, ready: {}, players: [] },
+    "local"
+  );
+  currentLevelNumber += 1;
+  buildWorld(currentLevelNumber, localStats.maxHp);
+  transitioning = false;
+}
 
 // ===== Colisões =====
 
@@ -406,6 +486,16 @@ onCollide("player", "coin", (pl, c) => {
 // da fase atual com a MESMA seed após 3 s (DefaultRespawnTicks do servidor).
 function hurtLocalPlayer(n: number): void {
   if (player.hp <= 0) return;
+  // Escudo da loja (singleplayer local, offline): consome 1 carga e zera o
+  // dano — espelho do AbsorbShield do servidor (main.go applyDamage: consome
+  // a carga e não aplica dano). Online o servidor é quem decide (o client
+  // apenas reflete o broadcast); aqui não há servidor, então o client decide.
+  if (!phaseState && localStats.shield > 0) {
+    localStats.shield -= 1;
+    playPowerUp();
+    particles.spawnShootImpact(player.pos.x, player.pos.y);
+    return;
+  }
   player.hp -= n;
   playDamage();
   particles.spawnDust(player.pos.x, player.pos.y + 20, 90);
@@ -789,10 +879,14 @@ function shopOpen(): boolean {
 }
 
 let wasGrounded = true;
+// Marco do último tiro (performance.now) — o cooldown local de tiro offline
+// (fire_rate da loja) é validado contra ele; online o servidor é quem valida.
+let lastShotAt = 0;
 onUpdate(() => {
   const frame = input.poll();
 
-  // Consome o estado apenas fora da loja (mundo pausado no servidor).
+  // Consome o estado apenas fora da loja (mundo pausado no servidor; na loja
+  // local offline o mundo também está pausado e o overlay bloqueia o input).
   if (!shopOpen() && player.exists()) {
     player.movePlayer(frame.direction);
     if (frame.jumpPressed) {
@@ -802,7 +896,15 @@ onUpdate(() => {
       }
       player.jumpPlayer();
     }
-    if (frame.shootPressed) {
+    // Cooldown de tiro: online o servidor valida (150ms / fire_rate) e cria o
+    // projétil autoritativo — o client envia a intenção sem throttle. Offline
+    // o client aplica o MESMO cooldown do servidor (fireCooldownMs) para o
+    // upgrade de cadência da loja ter efeito real na cadência local.
+    const cooldownOk = phaseState
+      ? true
+      : performance.now() - lastShotAt >= fireCooldownMs(localStats.fireRate);
+    if (frame.shootPressed && cooldownOk) {
+      if (!phaseState) lastShotAt = performance.now();
       playShoot();
       particles.spawnShootImpact(
         player.pos.x + player.facing * 24,
@@ -824,13 +926,15 @@ onUpdate(() => {
     }
   }
 
-  // Fim do mapa → próxima fase (singleplayer local, offline): a borda direita
-  // do player cruzou a primeira coluna do fim (isLevelFinished espelha o
-  // Level.Finished do servidor Go). Preserva as moedas da fase no caixa
-  // individual ANTES do buildWorld (que zera o contador da fase), avança o
-  // número da fase (= nova seed e dificuldade +1, levelgen) e reconstrói o
-  // mundo. Só dispara com o player vivo, fora de transição e sem broadcast de
-  // fase do servidor — em multiplayer o servidor é dono da máquina de fases.
+  // Fim do mapa → loja entre fases (singleplayer local, offline): a borda
+  // direita do player cruzou a primeira coluna do fim (isLevelFinished
+  // espelha o Level.Finished do servidor Go). Preserva as moedas da fase no
+  // caixa individual ANTES de abrir a loja, pausa o mundo e mostra o overlay
+  // — o jogador gasta o caixa em upgrades (max_hp/fire_rate/shield) e
+  // confirma 'pronto' para avançar (advanceOfflinePhase reconstrói o mapa
+  // seguinte com as stats novas). Só dispara com o player vivo, fora de
+  // transição e sem broadcast de fase do servidor — em multiplayer o
+  // servidor é dono da máquina de fases (onPhase).
   if (
     !transitioning &&
     !localDead &&
@@ -842,12 +946,9 @@ onUpdate(() => {
     transitioning = true;
     playPowerUp();
     particles.spawnCoinCollect(player.pos.x, player.pos.y);
-    wait(1.2, () => {
-      coinWallet += teamCoins;
-      currentLevelNumber += 1;
-      buildWorld(currentLevelNumber, playerMaxHp);
-      transitioning = false;
-    });
+    coinWallet += teamCoins;
+    setWorldPaused(true);
+    openLocalShop();
   }
 
   const grounded = player.exists() && player.isGrounded();
@@ -856,10 +957,14 @@ onUpdate(() => {
   }
   wasGrounded = grounded;
 
-  // Bolha de escudo: segue o player enquanto o ESCUDO (power-up) estiver
-  // ativo no broadcast de efeitos; some sozinha quando o servidor consome a
-  // carga (absorveu 1 hit → shield = 0 no próximo broadcast).
-  const shieldActive = (powerUpEffects[server.myId()]?.shield ?? 0) > 0;
+  // Bolha de escudo: online segue o player enquanto o ESCUDO (power-up)
+  // estiver ativo no broadcast de efeitos — some sozinha quando o servidor
+  // consome a carga. Offline (singleplayer local) a bolha espelha a carga do
+  // upgrade da loja (localStats.shield) e some quando hurtLocalPlayer a
+  // consome. O client apenas reflete, nunca decide.
+  const shieldActive = phaseState
+    ? (powerUpEffects[server.myId()]?.shield ?? 0) > 0
+    : localStats.shield > 0;
   shieldBubble.hidden = !shieldActive;
   if (shieldActive) {
     shieldBubble.pos = vec2(player.pos.x - 3, player.pos.y - 3);

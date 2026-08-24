@@ -81,6 +81,14 @@ func newGameServer() http.Handler {
 		projectiles.FireEnemyShot(sh)
 	})
 
+	// Boss autoritativo: máquina de estados (investida + salto) com o MESMO
+	// RNG da fase — aparece apenas nas fases múltiplas de 5 (BossPhaseStep),
+	// no meio do mapa. O hook de colisão de projéteis (StepWorldBoss) e os
+	// eventos de Step (dano de contato/área) são tratados no loop abaixo.
+	boss := game.NewBossSystemDefault(level.Spec.Seed)
+	boss.SetPhase(1)
+	boss.SpawnForLevel(&level)
+
 	// Moedas da fase: dono autoritativo do estado (entidades + contador por
 	// jogador DA FASE, separado da carteira persistente em sim). Espalhadas
 	// pelo grid inicial; drops de inimigos usam SpawnDrop (mesma trilha de
@@ -168,6 +176,9 @@ func newGameServer() http.Handler {
 		enemies.Reset(seed)
 		enemies.SetPhase(n)
 		enemies.SpawnForLevel(&level)
+		boss.Reset(seed)
+		boss.SetPhase(n)
+		boss.SpawnForLevel(&level)
 		coins.Reset()
 		coins.SpawnForLevel(&level)
 		projectiles.Clear()
@@ -323,17 +334,36 @@ func newGameServer() http.Handler {
 					}
 				}
 
-				// 2) Projéteis: amigáveis destróem inimigos — a destruição
-				//    DROPA moedas coletáveis na posição final do inimigo
+				// 2) Boss: máquina de estados (investida/salto) — dano por
+				//    contato e em área contra jogadores, sempre que houver
+				//    boss na fase (múltipla de 5).
+				for _, ev := range boss.Step(&lvl, players) {
+					if ev.Type == game.BossEventPlayerHit {
+						applyDamage(ev.PlayerID, ev.Damage)
+					}
+				}
+
+				// 3) Projéteis: amigáveis destróem inimigos E o boss — a
+				//    destruição DROPA moedas coletáveis na posição final
 				//    (SpawnDrop, mesma trilha das moedas geradas: coleta por
 				//    Step remove + conta, morte zera o contador da fase);
 				//    hostis ferem jogadores. Broadcast imediato para o
 				//    client ver as moedas surgirem no ponto da destruição.
-				for _, h := range projectiles.StepWorld(&lvl, enemies.Enemies(), players) {
+				for _, h := range projectiles.StepWorldBoss(&lvl, enemies.Enemies(), players, boss.Boss()) {
 					switch h.Kind {
 					case game.HitEnemy:
 						for _, ev := range enemies.ApplyDamage(h.TargetID, h.Damage, h.OwnerID) {
 							if ev.Type == game.EnemyEventDestroyed {
+								coins.SpawnDrop(ev.X, ev.Y, ev.Coins)
+								hub.Broadcast(game.CoinsMsg(coins.Snapshot(), nil, coins.Counts()))
+							}
+						}
+					case game.HitBoss:
+						// Tiro no bloco gigante: derrotou o boss, o drop
+						// gordo vira moedas coletáveis e o avanço dos
+						// players segue normalmente.
+						for _, ev := range boss.ApplyDamage(h.TargetID, h.Damage) {
+							if ev.Type == game.BossEventDefeated {
 								coins.SpawnDrop(ev.X, ev.Y, ev.Coins)
 								hub.Broadcast(game.CoinsMsg(coins.Snapshot(), nil, coins.Counts()))
 							}
@@ -343,7 +373,7 @@ func newGameServer() http.Handler {
 					}
 				}
 
-				// 3) Moedas: coleta por sobreposição (remove + contador do
+				// 4) Moedas: coleta por sobreposição (remove + contador do
 				//    player + CRÉDITO NA CARTEIRA da run + broadcast com
 				//    remoções e contagens). Cada moeda coletada vale 1 moeda
 				//    de carteira (Sim.AddCoins) — é essa carteira persistente
@@ -367,7 +397,7 @@ func newGameServer() http.Handler {
 					hub.Broadcast(game.CoinsMsg(coins.Snapshot(), removed, coins.Counts()))
 				}
 
-				// 4) Fim de fase: qualquer jogador que cruzou o fim do mapa
+				// 5) Fim de fase: qualquer jogador que cruzou o fim do mapa
 				//    fecha a fase e abre a loja — todos precisam confirmar
 				//    'pronto' antes do próximo mapa (EnterShop é idempotente;
 				//    o Run não deixa re-disparar).
@@ -384,7 +414,7 @@ func newGameServer() http.Handler {
 			}
 
 			if tick%2 == 0 {
-				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot(), coins.Snapshot(), coins.Counts()))
+				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot(), coins.Snapshot(), coins.Counts(), boss.Snapshot()))
 			}
 		}
 	}()

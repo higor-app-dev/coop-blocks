@@ -96,6 +96,7 @@ const (
 	HitEnemy                 // inimigo (AABB)
 	HitBounds                // saiu dos limites do mundo
 	HitPlayer                // jogador (AABB) — projétil hostil do atirador
+	HitBoss                  // boss (AABB) — projétil amigável no bloco gigante
 )
 
 // String devolve o nome legível do tipo de impacto (útil em logs).
@@ -111,6 +112,8 @@ func (k HitKind) String() string {
 		return "bounds"
 	case HitPlayer:
 		return "player"
+	case HitBoss:
+		return "boss"
 	}
 	return "unknown"
 }
@@ -238,7 +241,7 @@ func (s *ProjectileSystem) UpdateWorld(l *Level, enemies []Enemy, players []Play
 		dt = FixedDT
 	}
 	s.mu.Lock()
-	hits := s.stepLocked(l, enemies, players, dt)
+	hits := s.stepLocked(l, enemies, players, nil, dt)
 	onHit := s.onHit
 	s.mu.Unlock()
 
@@ -263,16 +266,37 @@ func (s *ProjectileSystem) StepWorld(l *Level, enemies []Enemy, players []Player
 	return s.UpdateWorld(l, enemies, players, FixedDT)
 }
 
+// StepWorldBoss avança um tick com o timestep fixo como StepWorld, incluindo
+// a colisão de projéteis amigáveis com o boss (HitBoss — o bloco gigante é
+// verificado ANTES dos inimigos: tiros no boss acertam o boss, mesmo com um
+// inimigo na frente). boss = nil desliga a colisão (fases sem boss).
+func (s *ProjectileSystem) StepWorldBoss(l *Level, enemies []Enemy, players []Player, boss *Boss) []ProjectileHit {
+	if dt := FixedDT; dt > 0 {
+		s.mu.Lock()
+		hits := s.stepLocked(l, enemies, players, boss, dt)
+		onHit := s.onHit
+		s.mu.Unlock()
+
+		if onHit != nil {
+			for _, h := range hits {
+				onHit(h)
+			}
+		}
+		return hits
+	}
+	return nil
+}
+
 // stepLocked avança um tick e devolve os hits. Deve ser chamada com o lock
 // held. Um projétil reporta no máximo 1 hit por tick (a primeira colisão na
-// ordem: parede → chão → borda → inimigo) e é removido ao fim.
-func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, players []Player, dt float64) []ProjectileHit {
+// ordem: parede → chão → borda → boss/inimigo → jogador) e é removido ao fim.
+func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, players []Player, boss *Boss, dt float64) []ProjectileHit {
 	var hits []ProjectileHit
 	for _, p := range s.projs {
 		if p.dead {
 			continue
 		}
-		if h := s.stepProjectileLocked(p, l, enemies, players, dt); h != nil {
+		if h := s.stepProjectileLocked(p, l, enemies, players, boss, dt); h != nil {
 			hits = append(hits, *h)
 			p.dead = true
 		}
@@ -288,8 +312,9 @@ func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, players []Playe
 }
 
 // stepProjectileLocked avança um projétil um tick. Devolve o hit se ele
-// colidiu (parede/chão/borda/inimigo) ou nil se seguiu em voo ou expirou.
-func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies []Enemy, players []Player, dt float64) *ProjectileHit {
+// colidiu (parede/chão/borda/boss/inimigo/jogador) ou nil se seguiu em voo
+// ou expirou.
+func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies []Enemy, players []Player, boss *Boss, dt float64) *ProjectileHit {
 	// 1) Lifetime: expira sem colisão (some silenciosamente).
 	p.Life -= dt
 	if p.Life <= 0 {
@@ -314,14 +339,18 @@ func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies
 		return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitBounds, X: p.X, Y: p.Y, Damage: p.Damage}
 	}
 
-	// 5) Alvo por facção: amigável acerta inimigo; hostil (atirador) acerta
-	//    jogador. AABB overlap com a hitbox do projétil.
-	if p.Hostile {
-		if id, ok := p.hitPlayer(players); ok {
-			return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitPlayer, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
+	// 5) Alvo por facção: amigável acerta boss (verificado PRIMEIRO — o
+	//    bloco gigante está na frente) e depois inimigo; hostil (atirador)
+	//    acerta jogador. AABB overlap com a hitbox do projétil.
+	if !p.Hostile {
+		if boss != nil && p.hitBoss(boss) {
+			return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitBoss, X: p.X, Y: p.Y, TargetID: boss.ID, Damage: p.Damage}
 		}
-	} else if id, ok := p.hitEnemy(enemies); ok {
-		return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitEnemy, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
+		if id, ok := p.hitEnemy(enemies); ok {
+			return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitEnemy, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
+		}
+	} else if id, ok := p.hitPlayer(players); ok {
+		return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitPlayer, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
 	}
 
 	return nil
@@ -403,6 +432,12 @@ func (p *Projectile) hitEnemy(enemies []Enemy) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hitBoss devolve true quando a hitbox do projétil sobrepõe a AABB do boss
+// (bloco gigante — o alvo mais fácil do jogo).
+func (p *Projectile) hitBoss(b *Boss) bool {
+	return p.X < b.X+b.W && p.X+p.W > b.X && p.Y < b.Y+b.H && p.Y+p.H > b.Y
 }
 
 // hitPlayer devolve (id, true) quando a hitbox do projétil sobrepõe a AABB de

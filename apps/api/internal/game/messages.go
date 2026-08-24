@@ -28,13 +28,19 @@ func PlayersMsg(players []PlayerState) map[string]any {
 }
 
 // WorldMsg é o broadcast periódico do estado completo do mundo: jogadores +
-// projéteis em voo + inimigos + moedas da fase + contadores por jogador.
-// Mantém o type "players" para compatibilidade com o client atual — os
-// campos projectiles/enemies/coins/coinCounts são extras e ignorados por
-// clients que não os leem.
-func WorldMsg(players []PlayerState, projectiles []ProjectileState, enemies []EnemyState, coins []CoinState, coinCounts map[string]int) map[string]any {
+// projéteis em voo + inimigos + moedas da fase + contadores por jogador +
+// boss (opcional — fases múltiplas de 5). Mantém o type "players" para
+// compatibilidade com o client atual — os campos projectiles/enemies/coins/
+// coinCounts/boss são extras e ignorados por clients que não os leem.
+// O último argumento é variádico para não quebrar chamadas antigas: sem boss,
+// o campo "boss" fica nulo (o client esconde a barra de HP).
+func WorldMsg(players []PlayerState, projectiles []ProjectileState, enemies []EnemyState, coins []CoinState, coinCounts map[string]int, bosses ...*BossState) map[string]any {
 	if coinCounts == nil {
 		coinCounts = map[string]int{}
+	}
+	var boss *BossState
+	if len(bosses) > 0 {
+		boss = bosses[0]
 	}
 	return map[string]any{
 		"type":        "players",
@@ -43,6 +49,7 @@ func WorldMsg(players []PlayerState, projectiles []ProjectileState, enemies []En
 		"enemies":     enemies,
 		"coins":       coins,
 		"coinCounts":  coinCounts,
+		"boss":        boss,
 	}
 }
 

@@ -3,6 +3,7 @@ import {
   MUTE_STORAGE_KEY,
   clampHp,
   createHud,
+  formatCoins,
   formatDeathMessage,
   formatHud,
   formatRespawnLabel,
@@ -72,6 +73,28 @@ describe("formatDeathMessage", () => {
     expect(formatDeathMessage()).toBe(
       "💀 Você morreu! Voltando em instantes..."
     );
+  });
+});
+
+// ===== Contador de moedas — helpers puros =====
+
+describe("formatCoins", () => {
+  it("retorna vazio quando o estado não fornece o dado (modo desligado)", () => {
+    expect(formatCoins(undefined)).toBe("");
+  });
+
+  it("formata o rótulo com o valor inteiro", () => {
+    expect(formatCoins(0)).toBe("🪙 0");
+    expect(formatCoins(1)).toBe("🪙 1");
+    expect(formatCoins(42)).toBe("🪙 42");
+  });
+
+  it("nunca exibe valor negativo (clamp em 0)", () => {
+    expect(formatCoins(-3)).toBe("🪙 0");
+  });
+
+  it("trunca valores fracionários", () => {
+    expect(formatCoins(7.9)).toBe("🪙 7");
   });
 });
 
@@ -182,6 +205,15 @@ describe("playerRowView", () => {
   it("vivo não carrega rótulo de respawn", () => {
     const view = playerRowView(player({ hp: 42 }), "p1");
     expect(view.respawnLabel).toBe("");
+  });
+
+  it("carrega rótulo de moedas quando o estado fornece player.coins", () => {
+    expect(playerRowView(player({ coins: 12 }), "p1").coinsLabel).toBe("🪙 12");
+  });
+
+  it("sem player.coins o rótulo de moedas fica vazio", () => {
+    expect(playerRowView(player(), "p1").coinsLabel).toBe("");
+    expect(playerRowView(player({ coins: undefined }), "p1").coinsLabel).toBe("");
   });
 });
 
@@ -399,6 +431,112 @@ describe("createHud — painel de HP dos jogadores", () => {
     update(hudState([player({ id: "p1" })]));
     const panel = byAttr(doc.body, "data-hud", "players")!;
     expect(byClass(panel, "player-row")).toHaveLength(1);
+  });
+});
+
+// ===== Contador de moedas — render via createHud/update =====
+
+const hudStateWith = (over: Partial<HudState> = {}, players = [player()]): HudState => ({
+  ...hudState(players),
+  ...over,
+});
+
+describe("createHud — contador de moedas", () => {
+  it("modo time: mostra o total da equipe no canto superior direito", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ teamCoins: 42 }));
+    const coins = byAttr(doc.body, "data-hud", "coins")!;
+    expect(coins.textContent).toBe("🪙 42");
+    expect(coins.style.display).toBe("");
+  });
+
+  it("modo time: zero coletado ainda exibe o contador (🪙 0)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ teamCoins: 0 }));
+    const coins = byAttr(doc.body, "data-hud", "coins")!;
+    expect(coins.textContent).toBe("🪙 0");
+  });
+
+  it("sem teamCoins o contador de equipe fica oculto", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudState([]));
+    const coins = byAttr(doc.body, "data-hud", "coins")!;
+    expect(coins.style.display).toBe("none");
+  });
+
+  it("modo individual: badge de moedas por jogador quando player.coins existe", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudStateWith(
+        {},
+        [
+          player({ id: "p1", coins: 7 }),
+          player({ id: "p2", coins: 3 }),
+        ]
+      )
+    );
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    const badges = byClass(panel, "player-coins");
+    expect(badges).toHaveLength(2);
+    expect(badges[0].textContent).toBe("🪙 7");
+    expect(badges[1].textContent).toBe("🪙 3");
+  });
+
+  it("sem player.coins o badge individual não é renderizado", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudStateWith(
+        {},
+        [
+          player({ id: "p1", coins: 7 }),
+          player({ id: "p2" }),
+        ]
+      )
+    );
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    const badges = byClass(panel, "player-coins");
+    expect(badges).toHaveLength(1);
+    expect(panel.children[1].children.map((c) => c.className)).not.toContain(
+      "player-coins"
+    );
+  });
+
+  it("modos time e individual coexistem quando ambos os dados chegam", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudStateWith(
+        { teamCoins: 10 },
+        [player({ id: "p1", coins: 6 }), player({ id: "p2", coins: 4 })]
+      )
+    );
+    const coins = byAttr(doc.body, "data-hud", "coins")!;
+    expect(coins.textContent).toBe("🪙 10");
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    expect(byClass(panel, "player-coins")).toHaveLength(2);
+  });
+
+  it("badge de moedas é a última coluna da linha (após o HP)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({}, [player({ id: "p1", coins: 5 })]));
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    expect(panel.children[0].children.map((c) => c.className)).toEqual([
+      "player-name",
+      "player-bar",
+      "player-hp",
+      "player-coins",
+    ]);
+  });
+
+  it("morto/aguardando respawn esconde o badge (contador da fase zera na morte)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudStateWith(
+        {},
+        [player({ id: "p1", hp: 0, respawning: true, coins: 9 })]
+      )
+    );
+    const panel = byAttr(doc.body, "data-hud", "players")!;
+    expect(byClass(panel, "player-coins")).toHaveLength(0);
   });
 });
 

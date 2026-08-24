@@ -16,7 +16,7 @@
  *     div.hud-phase   [data-hud="phase"]    fase/mapa (canto sup. esquerdo)
  *     div.hud-coins   [data-hud="coins"]    moedas da equipe (sup. direito)
  *     div.hud-status  [data-hud="status"]   mensagem transitória (centro-topo)
- *     div.hud-players [data-hud="players"]  painel de HP dos jogadores (vazio até o subtask de placar)
+ *     div.hud-players [data-hud="players"]  painel de HP dos jogadores + moedas individuais
  *     div.hud-arrows  [data-hud="arrows"]   camada de setas de direção (vazia até o subtask de setas)
  *     button.hud-mute [data-hud="mute"]     mute de áudio (🔊/🔇, pointer-events: auto)
  */
@@ -147,6 +147,25 @@ export function formatDeathMessage(): string {
   return "💀 Você morreu! Voltando em instantes...";
 }
 
+// ===== Contador de moedas =====
+//
+// O contador tem dois modos, definidos pelos dados que o estado fornece:
+//   - modo time:    state.teamCoins definido → total da equipe no canto
+//                   superior direito ([data-hud=coins]);
+//   - modo individual: player.coins definido → badge por jogador na linha
+//                   do painel ([data-hud=players]).
+// Os dois modos coexistem quando ambos os dados chegam.
+
+/**
+ * Rótulo de moedas exibido no HUD. Retorna "" quando o estado não fornece
+ * o dado (modo desligado); caso contrário formata "🪙 N" com o valor
+ * inteiro, nunca negativo.
+ */
+export function formatCoins(coins?: number): string {
+  if (coins === undefined) return "";
+  return `🪙 ${Math.max(0, Math.floor(coins))}`;
+}
+
 // ===== Painel de jogadores — helpers puros (testáveis) =====
 
 /**
@@ -189,6 +208,8 @@ export interface PlayerRowView {
   local: boolean;
   /** Rótulo de respawn com contagem (vazio quando vivo). */
   respawnLabel: string;
+  /** Rótulo de moedas individuais (vazio quando o estado não fornece). */
+  coinsLabel: string;
 }
 
 /** Deriva a visão de exibição de um jogador a partir do estado bruto. */
@@ -203,6 +224,7 @@ export function playerRowView(p: HudPlayer, localPlayerId: string): PlayerRowVie
     down,
     local: p.id === localPlayerId,
     respawnLabel: down ? formatRespawnLabel(p.respawnIn) : "",
+    coinsLabel: formatCoins(p.coins),
   };
 }
 
@@ -231,9 +253,19 @@ function renderPlayerRow(p: HudPlayer, localPlayerId: string): HTMLDivElement {
   fill.style.background = view.color;
   bar.appendChild(fill);
 
-  // Ordem = grid do CSS (auto | minmax(70px,1fr) | auto): nome fixo,
-  // barra flexível no meio, números à direita.
+  // Ordem = grid do CSS (auto | minmax(70px,1fr) | auto | auto): nome fixo,
+  // barra flexível no meio, números à direita e moedas na última coluna.
   row.append(name, bar, hp);
+
+  // Moedas individuais — badge na última coluna do grid; só aparece quando
+  // o estado fornece player.coins e o jogador está vivo (morto/aguardando
+  // respawn troca a linha pelo estado de espera e o contador da fase zera).
+  if (view.coinsLabel && !view.down) {
+    const coins = document.createElement("span");
+    coins.className = "player-coins";
+    coins.textContent = view.coinsLabel;
+    row.appendChild(coins);
+  }
 
   // Morto/aguardando respawn: a barra é ocultada via CSS (.is-down) e o
   // estado de espera com contagem aparece no lugar.
@@ -315,9 +347,10 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
       phaseEl.style.display = "none";
     }
 
-    // Moedas da equipe — topo, à direita.
+    // Moedas da equipe — topo, à direita (modo time do contador; o modo
+    // individual renderiza por jogador no painel abaixo).
     if (state.teamCoins !== undefined) {
-      coinsEl.textContent = `🪙 ${state.teamCoins}`;
+      coinsEl.textContent = formatCoins(state.teamCoins);
       coinsEl.style.display = "";
     } else {
       coinsEl.style.display = "none";

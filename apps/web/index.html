@@ -82,11 +82,13 @@
         background: none;
         padding: 0;
       }
-      /* Linha do painel: nome (cor do jogador) + barra de HP + números.
-         A coluna do meio (barra) encolhe; nome e HP ficam fixos. */
+      /* Linha do painel: nome (cor do jogador) + barra de HP + números +
+         moedas individuais (badge opcional na última coluna, que colapsa
+         quando o estado não fornece player.coins). A coluna do meio (barra)
+         encolhe; nome, HP e moedas ficam fixos. */
       .hud-root .player-row {
         display: grid;
-        grid-template-columns: auto minmax(70px, 1fr) auto;
+        grid-template-columns: auto minmax(70px, 1fr) auto auto;
         align-items: center;
         gap: 6px;
         padding: 4px 8px;
@@ -112,6 +114,14 @@
         text-align: right;
         font-variant-numeric: tabular-nums;
       }
+      /* Moedas individuais — badge dourado na última coluna do grid. */
+      .hud-root .player-coins {
+        font-size: 11px;
+        font-weight: 600;
+        color: #ffd73c;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
       .hud-root .player-bar {
         height: 8px;
         border-radius: 999px;
@@ -130,7 +140,7 @@
         display: none;
       }
       .hud-root .player-respawn {
-        grid-column: 2 / 4;
+        grid-column: 2 / 5;
         font-size: 12px;
         font-weight: 600;
         color: #ff8a80;

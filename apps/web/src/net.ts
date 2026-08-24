@@ -28,7 +28,15 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}${opts.url}`);
+    // URL absoluta (http/https/ws/wss — ex.: VITE_API_URL apontando para o
+    // backend real em outro host) é usada direto, convertendo http(s) → ws(s)
+    // para o construtor WebSocket. URL relativa mantém o comportamento
+    // same-origin (reverse proxy nginx da produção primária).
+    const absolute = /^(wss?|https?):\/\//i.test(opts.url);
+    const target = absolute
+      ? opts.url.replace(/^http/i, "ws")
+      : `${proto}://${location.host}${opts.url}`;
+    ws = new WebSocket(target);
 
     ws.onopen = () => {
       connected = true;

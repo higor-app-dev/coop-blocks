@@ -117,7 +117,10 @@ for (const spawn of enemySpawners) spawn();
 // ===== Multiplayer (WebSocket) =====
 const netPlayers: NetPlayer[] = [];
 const server = connectToServer(k, {
-  url: (import.meta.env.DEV ? "" : "") + "/api/ws",
+  // VITE_API_URL (build-time, Vercel) aponta para o backend real quando o
+  // front não é servido pelo nginx same-origin (ex.: mirror Vercel). Sem a
+  // env, mantém a URL relativa → reverse proxy same-origin da produção.
+  url: import.meta.env.VITE_API_URL ?? "/api/ws",
   player,
   onPlayers: (list) => {
     netPlayers.length = 0;

@@ -31,18 +31,30 @@ func main() {
 
 	// Projéteis: servidor é dono do estado (posição/velocidade/dono). O hook de
 	// colisão é onde a camada de HP/respawn (t_244f297c) conecta o dano real —
-	// aqui apenas loga como prova de que o hook dispara.
+	// aqui o loop processa os hits diretamente (inimigos destrutíveis, tiros
+	// hostis contra jogadores).
 	projectiles := game.NewProjectileSystemDefault()
-	projectiles.OnHit(func(h game.ProjectileHit) {
-		log.Printf("projectile hit: kind=%s owner=%s target=%q at (%d,%d) dmg=%d",
-			h.Kind, h.OwnerID, h.TargetID, int(h.X), int(h.Y), h.Damage)
+
+	// Inimigos autoritativos: IA determinística com RNG semeado pela fase
+	// (mesma seed da sala → todos os jogadores veem o mesmo comportamento).
+	// Presença/tipo respeita a fase atual (andador 1+, voador 3+, atirador 5+).
+	enemies := game.NewEnemySystemDefault(level.Spec.Seed)
+	enemies.SetPhase(1)
+	enemies.SpawnForLevel(&level)
+	enemies.OnShoot(func(sh game.EnemyShot) {
+		projectiles.FireEnemyShot(sh)
 	})
+
+	// Simulação de HP/moedas/respawn: aplica dano de contato e de projétil
+	// hostil, e credita as moedas dos drops aos atiradores.
+	sim := game.NewSimDefault(game.NewRandomSource(int64(level.Spec.Seed)))
 
 	// Bridge: eventos do hub -> sala, e broadcast da sala -> hub
 	hub.OnJoin(func(c *ws.Client) {
 		p := room.AddPlayer(c.ID())
+		sim.AddPlayer(c.ID())
 		c.SetState(game.PlayerState{
-			X:  p.X, Y: p.Y, HP: p.HP,
+			X: p.X, Y: p.Y, HP: p.HP,
 		})
 		hub.Broadcast(game.WelcomeMsg(c.ID(), room.Snapshot()))
 	})
@@ -69,17 +81,46 @@ func main() {
 	})
 
 	// Loop de simulação: tick fixo de 50 ms (20 tps, game.FixedDT) avançando
-	// os projéteis contra o grid da fase; broadcast do mundo a cada 2 ticks
-	// (~10 Hz, mantém a frequência de antes). Inimigos ainda não existem como
-	// entidades no servidor — a lista chega vazia até a tarefa de HP/inimigos.
+	// inimigos (IA + contato) e projéteis (amigáveis contra inimigos, hostis
+	// contra jogadores); broadcast do mundo a cada 2 ticks (~10 Hz, mantém a
+	// frequência de antes).
 	go func() {
 		t := time.NewTicker(50 * time.Millisecond)
 		defer t.Stop()
 		for tick := 0; ; tick++ {
 			<-t.C
-			projectiles.Step(&level, nil)
+			players := room.Players()
+
+			// 1) Inimigos: IA determinística + contato com jogadores.
+			for _, ev := range enemies.Step(&level, players) {
+				if ev.Type == game.EnemyEventPlayerHit {
+					if _, err := sim.ApplyDamage(ev.PlayerID, ev.Damage); err != nil {
+						log.Printf("enemy contact damage: %v", err)
+					}
+				}
+			}
+
+			// 2) Projéteis: amigáveis destróem inimigos (drop de moedas para o
+			//    atirador); hostis ferem jogadores.
+			for _, h := range projectiles.StepWorld(&level, enemies.Enemies(), players) {
+				switch h.Kind {
+				case game.HitEnemy:
+					for _, ev := range enemies.ApplyDamage(h.TargetID, h.Damage, h.OwnerID) {
+						if ev.Type == game.EnemyEventDestroyed {
+							if _, err := sim.AddCoins(ev.PlayerID, ev.Coins); err != nil {
+								log.Printf("coin drop: %v", err)
+							}
+						}
+					}
+				case game.HitPlayer:
+					if _, err := sim.ApplyDamage(h.TargetID, h.Damage); err != nil {
+						log.Printf("enemy shot damage: %v", err)
+					}
+				}
+			}
+
 			if tick%2 == 0 {
-				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot()))
+				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot()))
 			}
 		}
 	}()

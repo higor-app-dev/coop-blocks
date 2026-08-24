@@ -28,12 +28,14 @@ func PlayersMsg(players []PlayerState) map[string]any {
 }
 
 // WorldMsg é o broadcast periódico do estado completo do mundo: jogadores +
-// projéteis em voo. Mantém o type "players" para compatibilidade com o client
-// atual — o campo projectiles é extra e ignorado por clients que não o leem.
-func WorldMsg(players []PlayerState, projectiles []ProjectileState) map[string]any {
+// projéteis em voo + inimigos. Mantém o type "players" para compatibilidade
+// com o client atual — os campos projectiles/enemies são extras e ignorados
+// por clients que não os leem.
+func WorldMsg(players []PlayerState, projectiles []ProjectileState, enemies []EnemyState) map[string]any {
 	return map[string]any{
 		"type":        "players",
 		"players":     players,
 		"projectiles": projectiles,
+		"enemies":     enemies,
 	}
 }

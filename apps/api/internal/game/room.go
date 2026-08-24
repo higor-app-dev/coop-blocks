@@ -133,6 +133,18 @@ func (r *Room) GetPlayer(id string) (*Player, bool) {
 	return p, ok
 }
 
+// Players devolve cópias do estado de todos os jogadores COM ID (para a IA de
+// inimigos: seleção determinística de alvo e dano de contato).
+func (r *Room) Players() []Player {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Player, 0, len(r.players))
+	for _, p := range r.players {
+		out = append(out, *p)
+	}
+	return out
+}
+
 // Snapshot retorna o estado de todos os jogadores (para broadcast).
 func (r *Room) Snapshot() []PlayerState {
 	r.mu.RLock()

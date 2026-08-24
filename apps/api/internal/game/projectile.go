@@ -1,10 +1,11 @@
 // Package game — projéteis (tiro) simulados no servidor (autoritativo).
 //
-// Este arquivo implementa o tiro do jogador no servidor: um projétil é criado
-// na frente do jogador (na direção em que ele está olhando), avança a cada
-// tick com velocidade constante e some ao colidir com parede/chão do grid da
-// fase, ao acertar um inimigo, ao sair dos limites do mundo ou ao expirar o
-// tempo de vida.
+// Este arquivo implementa o tiro no servidor: projéteis amigáveis (jogador)
+// e hostis (inimigo atirador). Um projétil amigável é criado na frente do
+// jogador, avança a cada tick com velocidade constante e some ao colidir com
+// parede/chão do grid da fase, ao acertar um inimigo, ao sair dos limites do
+// mundo ou ao expirar o tempo de vida. Projéteis hostis (FireEnemyShot,
+// Hostile=true) colidem com jogadores (HitPlayer) em vez de inimigos.
 //
 // O servidor é dono do estado do projétil (posição, velocidade, dono) e o
 // expõe via Snapshot (ProjectileState) para o broadcast — o client apenas
@@ -86,16 +87,6 @@ func (c ProjectileConfig) withDefaults() ProjectileConfig {
 	return c
 }
 
-// Enemy é a representação mínima de um inimigo no servidor: ID + AABB em
-// pixels (X/Y = canto superior esquerdo; W/H = dimensões). A tarefa de
-// HP/inimigos pode estender este tipo; o sistema de projéteis só precisa da
-// hitbox para detectar colisões.
-type Enemy struct {
-	ID   string
-	X, Y float64
-	W, H float64
-}
-
 // HitKind identifica o que um projétil atingiu.
 type HitKind int
 
@@ -104,6 +95,7 @@ const (
 	HitFloor                 // tile sólido atingido na vertical (chão/teto)
 	HitEnemy                 // inimigo (AABB)
 	HitBounds                // saiu dos limites do mundo
+	HitPlayer                // jogador (AABB) — projétil hostil do atirador
 )
 
 // String devolve o nome legível do tipo de impacto (útil em logs).
@@ -117,6 +109,8 @@ func (k HitKind) String() string {
 		return "enemy"
 	case HitBounds:
 		return "bounds"
+	case HitPlayer:
+		return "player"
 	}
 	return "unknown"
 }
@@ -145,6 +139,7 @@ type Projectile struct {
 	Life    float64 // segundos restantes de voo (expira em 0)
 	Damage  int
 	W, H    float64 // hitbox (cópia da config, usada nas colisões)
+	Hostile bool    // projétil do atirador: colide com jogadores, não inimigos
 
 	dead bool // marcado no tick em que colidiu/expirou; removido no fim do Update
 }
@@ -158,6 +153,7 @@ type ProjectileState struct {
 	Y       int     `json:"y"`
 	VX      float64 `json:"vx"`
 	VY      float64 `json:"vy"`
+	Hostile bool    `json:"hostile"`
 }
 
 // ProjectileSystem gerencia todos os projéteis do mundo: cria (Fire), avança
@@ -223,16 +219,26 @@ func (s *ProjectileSystem) Fire(ownerID string, x, y float64, facing int) *Proje
 	return p
 }
 
-// Update avança todos os projéteis em dt segundos contra o grid da fase (l)
-// e os inimigos dados, removendo os que colidem ou expiram. Retorna os hits
-// deste tick — também entregues ao hook OnHit, quando registrado. O hook é
-// chamado SEM o lock held (pode chamar de volta o sistema sem deadlock).
+// Update avança todos os projéteis amigáveis (sem colisão com jogadores) em
+// dt segundos contra o grid da fase (l) e os inimigos dados, removendo os que
+// colidem ou expiram. É o mesmo que UpdateWorld com players = nil — mantido
+// para compatibilidade com o loop antigo e testes existentes.
 func (s *ProjectileSystem) Update(l *Level, enemies []Enemy, dt float64) []ProjectileHit {
+	return s.UpdateWorld(l, enemies, nil, dt)
+}
+
+// UpdateWorld avança todos os projéteis em dt segundos contra o grid da fase
+// (l), os inimigos e os jogadores dados, removendo os que colidem ou expiram.
+// Projéteis amigáveis colidem com inimigos; projéteis hostis (do atirador,
+// Hostile=true) colidem com jogadores (HitPlayer). Retorna os hits deste tick
+// — também entregues ao hook OnHit, quando registrado. O hook é chamado SEM o
+// lock held (pode chamar de volta o sistema sem deadlock).
+func (s *ProjectileSystem) UpdateWorld(l *Level, enemies []Enemy, players []Player, dt float64) []ProjectileHit {
 	if dt <= 0 {
 		dt = FixedDT
 	}
 	s.mu.Lock()
-	hits := s.stepLocked(l, enemies, dt)
+	hits := s.stepLocked(l, enemies, players, dt)
 	onHit := s.onHit
 	s.mu.Unlock()
 
@@ -250,16 +256,23 @@ func (s *ProjectileSystem) Step(l *Level, enemies []Enemy) []ProjectileHit {
 	return s.Update(l, enemies, FixedDT)
 }
 
+// StepWorld avança um tick com o timestep fixo, incluindo colisão com
+// jogadores (projéteis hostis). Use no loop do servidor quando houver inimigos
+// e jogadores no mundo.
+func (s *ProjectileSystem) StepWorld(l *Level, enemies []Enemy, players []Player) []ProjectileHit {
+	return s.UpdateWorld(l, enemies, players, FixedDT)
+}
+
 // stepLocked avança um tick e devolve os hits. Deve ser chamada com o lock
 // held. Um projétil reporta no máximo 1 hit por tick (a primeira colisão na
 // ordem: parede → chão → borda → inimigo) e é removido ao fim.
-func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, dt float64) []ProjectileHit {
+func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, players []Player, dt float64) []ProjectileHit {
 	var hits []ProjectileHit
 	for _, p := range s.projs {
 		if p.dead {
 			continue
 		}
-		if h := s.stepProjectileLocked(p, l, enemies, dt); h != nil {
+		if h := s.stepProjectileLocked(p, l, enemies, players, dt); h != nil {
 			hits = append(hits, *h)
 			p.dead = true
 		}
@@ -276,7 +289,7 @@ func (s *ProjectileSystem) stepLocked(l *Level, enemies []Enemy, dt float64) []P
 
 // stepProjectileLocked avança um projétil um tick. Devolve o hit se ele
 // colidiu (parede/chão/borda/inimigo) ou nil se seguiu em voo ou expirou.
-func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies []Enemy, dt float64) *ProjectileHit {
+func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies []Enemy, players []Player, dt float64) *ProjectileHit {
 	// 1) Lifetime: expira sem colisão (some silenciosamente).
 	p.Life -= dt
 	if p.Life <= 0 {
@@ -301,8 +314,13 @@ func (s *ProjectileSystem) stepProjectileLocked(p *Projectile, l *Level, enemies
 		return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitBounds, X: p.X, Y: p.Y, Damage: p.Damage}
 	}
 
-	// 5) Inimigos: AABB overlap com a hitbox do projétil.
-	if id, ok := p.hitEnemy(enemies); ok {
+	// 5) Alvo por facção: amigável acerta inimigo; hostil (atirador) acerta
+	//    jogador. AABB overlap com a hitbox do projétil.
+	if p.Hostile {
+		if id, ok := p.hitPlayer(players); ok {
+			return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitPlayer, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
+		}
+	} else if id, ok := p.hitEnemy(enemies); ok {
 		return &ProjectileHit{ProjectileID: p.ID, OwnerID: p.OwnerID, Kind: HitEnemy, X: p.X, Y: p.Y, TargetID: id, Damage: p.Damage}
 	}
 
@@ -387,6 +405,60 @@ func (p *Projectile) hitEnemy(enemies []Enemy) (string, bool) {
 	return "", false
 }
 
+// hitPlayer devolve (id, true) quando a hitbox do projétil sobrepõe a AABB de
+// algum jogador (PlayerWidth x PlayerHeight, top-left em PlayerState).
+func (p *Projectile) hitPlayer(players []Player) (string, bool) {
+	for i := range players {
+		pl := &players[i]
+		px, py := float64(pl.X), float64(pl.Y)
+		if p.X < px+PlayerWidth && p.X+p.W > px && p.Y < py+PlayerHeight && p.Y+p.H > py {
+			return pl.ID, true
+		}
+	}
+	return "", false
+}
+
+// FireEnemyShot cria um projétil hostil (do atirador) em direção ao alvo. A
+// origem (X, Y) é o centro do atirador; a direção aponta para o centro do alvo
+// (TargetX, TargetY) com velocidade Speed. A hitbox do projétil é centralizada
+// na origem. Projéteis hostis colidem com jogadores (HitPlayer) em vez de
+// inimigos.
+func (s *ProjectileSystem) FireEnemyShot(sh EnemyShot) *Projectile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	dx := sh.TargetX - sh.X
+	dy := sh.TargetY - sh.Y
+	speed := sh.Speed
+	if speed <= 0 {
+		speed = s.cfg.Speed
+	}
+	vx, vy := speed, 0.0
+	if length := math.Hypot(dx, dy); length > 0 {
+		vx = dx / length * speed
+		vy = dy / length * speed
+	}
+	life := sh.Lifetime
+	if life <= 0 {
+		life = s.cfg.Lifetime
+	}
+	p := &Projectile{
+		ID:      fmt.Sprintf("p%d", s.nextID),
+		OwnerID: "enemy:" + sh.EnemyID,
+		X:       sh.X - s.cfg.Width/2,
+		Y:       sh.Y - s.cfg.Height/2,
+		VX:      vx,
+		VY:      vy,
+		Life:    life,
+		Damage:  s.cfg.Damage,
+		W:       s.cfg.Width,
+		H:       s.cfg.Height,
+		Hostile: true,
+	}
+	s.projs[p.ID] = p
+	return p
+}
+
 // Snapshot devolve cópias ordenadas por ID do estado de todos os projéteis em
 // voo (para o broadcast). A ordem estável garante consistência entre ticks.
 func (s *ProjectileSystem) Snapshot() []ProjectileState {
@@ -404,6 +476,7 @@ func (s *ProjectileSystem) Snapshot() []ProjectileState {
 			Y:       int(math.Round(p.Y)),
 			VX:      p.VX,
 			VY:      p.VY,
+			Hostile: p.Hostile,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

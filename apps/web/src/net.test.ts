@@ -84,3 +84,132 @@ describe("connectToServer — conexão", () => {
     expect(msg.hp).toBe(100);
   });
 });
+
+// ===== Mensagens de fase da loja =====
+
+function captureWs(sent: string[]) {
+  const ws = FakeWebSocket.instances[0];
+  ws.send = (d: string) => sent.push(d);
+  return ws;
+}
+
+describe("connectToServer — broadcast de fase (loja)", () => {
+  it("phase=shop dispara onPhase com o estado completo da loja", () => {
+    const onPhase = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPhase });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "phase",
+        phase: "shop",
+        number: 2,
+        ready: { alice: true, bob: false },
+        players: [
+          { id: "alice", coins: 120, stats: { maxHp: 125, fireRate: 1.2, shield: 1 } },
+          { id: "bob", coins: 20, stats: { maxHp: 100, fireRate: 1, shield: 0 } },
+        ],
+      }),
+    });
+    expect(onPhase).toHaveBeenCalledWith({
+      phase: "shop",
+      number: 2,
+      ready: { alice: true, bob: false },
+      players: [
+        { id: "alice", coins: 120, stats: { maxHp: 125, fireRate: 1.2, shield: 1 } },
+        { id: "bob", coins: 20, stats: { maxHp: 100, fireRate: 1, shield: 0 } },
+      ],
+    });
+  });
+
+  it("phase=playing (próximo mapa) dispara onPhase com phase playing", () => {
+    const onPhase = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPhase });
+    captureWs([]).onmessage?.({ data: JSON.stringify({ type: "phase", phase: "playing", number: 3 }) });
+    expect(onPhase).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "playing", number: 3 })
+    );
+  });
+
+  it("phase sem campos opcionais é tolerado (defaults seguros)", () => {
+    const onPhase = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPhase });
+    captureWs([]).onmessage?.({ data: JSON.stringify({ type: "phase", phase: "shop" }) });
+    expect(onPhase).toHaveBeenCalledWith({ phase: "shop", number: 1, ready: {}, players: [] });
+  });
+});
+
+describe("connectToServer — resposta de compra (shop_buy_result)", () => {
+  it("ok=true entrega o comprovante com stats e saldo", () => {
+    const onShopBuyResult = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onShopBuyResult });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "shop_buy_result",
+        ok: true,
+        upgrade: "shield",
+        level: 1,
+        cost: 30,
+        coins: 90,
+        stats: { maxHp: 100, fireRate: 1, shield: 1 },
+      }),
+    });
+    expect(onShopBuyResult).toHaveBeenCalledWith({
+      upgrade: "shield",
+      level: 1,
+      cost: 30,
+      coins: 90,
+      stats: { maxHp: 100, fireRate: 1, shield: 1 },
+    });
+  });
+
+  it("ok=false entrega o erro (moedas insuficientes)", () => {
+    const onShopBuyResult = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onShopBuyResult });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "shop_buy_result", ok: false, error: "moedas insuficientes" }),
+    });
+    expect(onShopBuyResult).toHaveBeenCalledWith({ ok: false, error: "moedas insuficientes" });
+  });
+});
+
+describe("connectToServer — erro de pronto (shop_ready_result)", () => {
+  it("entrega o erro do servidor", () => {
+    const onShopReadyError = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onShopReadyError });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "shop_ready_result", ok: false, error: "fora da loja" }),
+    });
+    expect(onShopReadyError).toHaveBeenCalledWith("fora da loja");
+  });
+});
+
+describe("connectToServer — envio de intenções da loja", () => {
+  it("sendShopBuy envia {type:shop_buy, upgrade}", () => {
+    const sent: string[] = [];
+    const server = connectToServer(makeK() as any, makeOpts("/api/ws"));
+    const ws = captureWs(sent);
+    ws.onopen?.();
+    sent.length = 0; // descarta o state do onopen
+    server.sendShopBuy("shield");
+    expect(JSON.parse(sent[0])).toEqual({ type: "shop_buy", upgrade: "shield" });
+  });
+
+  it("sendShopReady envia {type:shop_ready} sem payload", () => {
+    const sent: string[] = [];
+    const server = connectToServer(makeK() as any, makeOpts("/api/ws"));
+    const ws = captureWs(sent);
+    ws.onopen?.();
+    sent.length = 0;
+    server.sendShopReady();
+    expect(JSON.parse(sent[0])).toEqual({ type: "shop_ready" });
+  });
+
+  it("não envia nada com a conexão fechada", () => {
+    const sent: string[] = [];
+    const server = connectToServer(makeK() as any, makeOpts("/api/ws"));
+    const ws = captureWs(sent);
+    ws.readyState = 0; // CONNECTING — send() deve ignorar
+    server.sendShopBuy("max_hp");
+    server.sendShopReady();
+    expect(sent).toEqual([]);
+  });
+});

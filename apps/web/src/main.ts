@@ -1,8 +1,8 @@
 import kaplay from "kaplay";
 import { createPlayer } from "./player";
 import { spawnEnemy } from "./enemies";
-import { generateLevel, TILE } from "./levelgen";
-import { connectToServer, type NetPlayer } from "./net";
+import { generateLevel, TILE, type LevelData } from "./levelgen";
+import { connectToServer, type NetPhaseState, type NetPlayer } from "./net";
 import { createInput } from "./input";
 import { computeButtonSpecs } from "./touch-buttons";
 import {
@@ -14,6 +14,7 @@ import {
   type HudState,
 } from "./hud";
 import { createParticles } from "./particles";
+import { createShop } from "./shop";
 import {
   playCoin,
   playDamage,
@@ -98,11 +99,15 @@ const {
   outline,
   rgb,
   destroy,
+  destroyAll,
   wait,
   rand,
 } = k;
 
 const MAX_HP = 100;
+// Tags dos objetos que pertencem ao MUNDO (mapa atual) e são destruídos na
+// transição de fase — o player é reutilizado entre mapas, não entra aqui.
+const WORLD_TAGS = ["solid", "coin", "enemy"];
 
 // ===== Áudio + partículas =====
 // Mute aplicado IMEDIATAMENTE (master gain nasce no estado correto mesmo
@@ -146,43 +151,86 @@ const initAudio = () => {
 window.addEventListener("pointerdown", initAudio, { once: true });
 window.addEventListener("keydown", initAudio, { once: true });
 
-// ===== Fase gerada automaticamente =====
-const level = generateLevel(k, { width: 120, height: 12, seed: Date.now() });
-level.render();
+// ===== Fase da run (loja entre mapas) =====
+// O servidor é autoritativo: broadcasta phase="shop" ao fim de cada mapa e
+// phase="playing" (número novo) quando TODOS confirmaram 'pronto'. Aqui
+// guardamos o último estado recebido para renderizar a loja e reconstruir o
+// mundo no avanço de fase.
+let phaseState: NetPhaseState | null = null;
+let currentLevelNumber = 1;
+// Teto de vida efetivo do jogador local (100 base + upgrades de max_hp).
+let playerMaxHp = MAX_HP;
 
-// ===== Moedas (coleta) =====
-// Fileira de moedas sobre o chão (toda 4ª coluna sólida, acima do tile de
-// solo). Coleta: som de moeda + partículas douradas + contador no HUD.
-let teamCoins = 0;
-// Topo do chão: o tile mais baixo do grid (o chão tem 2 fileiras, a superior
-// é maxY-1). Moedas ficam uma fileira acima do solo.
-const GROUND_ROW = Math.max(...level.tiles.map((t) => t.y)) - 1;
-for (const t of level.tiles) {
-  if (t.y === GROUND_ROW && t.x >= 6 && t.x % 4 === 0) {
-    add([
-      "coin",
-      pos(t.x * TILE + TILE / 2, t.y * TILE - 30),
-      rect(14, 14),
-      color(255, 215, 60),
-      area(),
-      z(3),
-    ]);
+// ===== Mundo (mapa atual) =====
+// O mapa N é gerado com seed = N — espelho do servidor (baseSeed=1 +
+// (número-1) em cmd/server/main.go): a mesma fase é sempre o mesmo mapa para
+// todos os jogadores. O player é criado UMA vez (net.ts e os handlers de
+// colisão seguram a referência) e reposicionado entre fases.
+let level: LevelData;
+
+function buildWorld(number: number, maxHp: number): void {
+  // Destrói o mundo anterior (tiles/moedas/inimigos); o player sobrevive.
+  for (const tag of WORLD_TAGS) {
+    destroyAll(tag);
   }
+  teamCoins = 0;
+
+  level = generateLevel(k, { width: 120, height: 12, seed: number });
+  level.render();
+
+  // Moedas (coleta): fileira sobre o chão (toda 4ª coluna sólida). Topo do
+  // chão = tile mais baixo do grid menos 1 (o chão tem 2 fileiras).
+  const groundRow = Math.max(...level.tiles.map((t) => t.y)) - 1;
+  for (const t of level.tiles) {
+    if (t.y === groundRow && t.x >= 6 && t.x % 4 === 0) {
+      add([
+        "coin",
+        pos(t.x * TILE + TILE / 2, t.y * TILE - 30),
+        rect(14, 14),
+        color(255, 215, 60),
+        area(),
+        z(3),
+      ]);
+    }
+  }
+
+  // Inimigos (base).
+  for (const p of level.enemySpawns) {
+    spawnEnemy(k, { pos: p, damage: 10, maxHp: MAX_HP });
+  }
+
+  // Player local: reposiciona no spawn do novo mapa com o teto efetivo.
+  player.hp = maxHp;
+  player.pos = vec2(level.playerSpawn.x, level.playerSpawn.y);
+  player.hidden = false;
+  player.paused = false;
+  playerMaxHp = maxHp;
+  localDead = false;
 }
 
 // ===== Jogador local =====
-const player = createPlayer(k, {
-  pos: level.playerSpawn,
+// Nascido com o spawn da fase 1 (o mundo é construído logo abaixo); entre
+// fases buildWorld apenas o reposiciona — a referência nunca muda.
+let player = createPlayer(k, {
+  pos: generateLevel(k, { width: 120, height: 12, seed: 1 }).playerSpawn,
   maxHp: MAX_HP,
 });
 player.onDestroy(() => {
   localDead = true;
 });
 
-// ===== Inimigos (base) =====
-for (const p of level.enemySpawns) {
-  spawnEnemy(k, { pos: p, damage: 10, maxHp: MAX_HP });
-}
+let teamCoins = 0;
+buildWorld(1, MAX_HP);
+
+// ===== Loja entre fases (overlay) =====
+// Aparece quando o servidor abre a loja (phase="shop"); comprar dispara
+// shop_buy, confirmar dispara shop_ready. O overlay some quando o broadcast
+// de fase volta para "playing" (todos prontos) — aí o buildWorld reconstrói
+// o próximo mapa.
+const shop = createShop({
+  onBuy: (upgrade) => server.sendShopBuy(upgrade),
+  onReady: () => server.sendShopReady(),
+});
 
 // ===== Colisões =====
 
@@ -207,14 +255,14 @@ onCollide("player", "enemy", (pl, en) => {
       particles.spawnEnemyDeath(pl.pos.x, pl.pos.y);
       // Não destrói o objeto: esconde + pausa (o net.ts e os handlers ainda
       // referenciam o mesmo player) e respawna no spawn após 3s — mesmo
-      // DefaultRespawnTicks do servidor.
+      // DefaultRespawnTicks do servidor. O teto respeita os upgrades.
       localDead = true;
       pl.hidden = true;
       pl.paused = true;
       wait(3, () => {
         pl.hidden = false;
         pl.paused = false;
-        pl.hp = MAX_HP;
+        pl.hp = playerMaxHp;
         pl.pos = vec2(level.playerSpawn.x, level.playerSpawn.y);
         localDead = false;
         playPowerUp();
@@ -270,6 +318,35 @@ const server = connectToServer(k, {
       netPlayers.splice(i, 1);
     }
   },
+  // Fase da run: abre/fecha a loja e reconstrói o mundo quando o servidor
+  // broadcasta o próximo mapa (todos prontos).
+  onPhase: (state) => {
+    phaseState = state;
+    if (state.phase === "shop") {
+      // Loja aberta: overlay visível com saldo/catálogo/prontos.
+      shop.update(state, server.myId());
+      return;
+    }
+    // phase=playing: esconde a loja; mapa novo → reconstrói o mundo com o
+    // teto de vida efetivo (upgrades de max_hp comprados na loja).
+    shop.update(state, server.myId());
+    if (state.number !== currentLevelNumber) {
+      const mine = state.players.find((p) => p.id === server.myId());
+      currentLevelNumber = state.number;
+      buildWorld(state.number, mine?.stats.maxHp ?? playerMaxHp);
+    }
+  },
+  // Resposta individual de compra: comprovante atualiza a tela na hora;
+  // erro (moedas insuficientes, nível máximo) aparece na loja.
+  onShopBuyResult: (rc) => {
+    if ("ok" in rc) {
+      shop.showError(rc.error);
+      return;
+    }
+    shop.applyBuyResult(rc);
+  },
+  // Erro de pronto (ex.: fora da loja) — mostra na tela e deixa tentar de novo.
+  onShopReadyError: (err) => shop.showError(err),
 });
 
 // ===== Controles (input adaptativo: teclado + touch) =====
@@ -280,6 +357,7 @@ const server = connectToServer(k, {
 // fixos na tela e consumimos o estado digital por frame (poll) — pulo/tiro
 // disparam uma única vez por gesto (borda limpa pelo poll), sem repetição
 // contínua enquanto tecla/zona é segurada.
+// Na loja (phase="shop") o mundo está pausado no servidor: ignora input.
 const input = createInput(k, {
   onModeChange: (mode) => setTouchButtonsVisible(mode === "touch"),
 });
@@ -335,8 +413,7 @@ refreshTouchButtons();
 
 // ===== Câmera segue o jogador + HUD a cada frame =====
 // O estado do HUD é montado do estado real do jogo e passado para o módulo
-// hud.ts, que renderiza o overlay. O servidor ainda não envia nome/cor/moedas/
-// fase — os campos opcionais ficam ocultos até esses dados existirem.
+// hud.ts, que renderiza o overlay. A fase exibida vem do broadcast da run.
 function buildHudState(): HudState {
   const players: HudPlayer[] = [];
   const cam = k.getCamPos();
@@ -355,7 +432,7 @@ function buildHudState(): HudState {
       name: "Você",
       color: "rgb(66, 200, 245)",
       hp: player.hp,
-      maxHp: MAX_HP,
+      maxHp: playerMaxHp,
       x: player.pos.x,
       y: player.pos.y,
       respawning: localDead,
@@ -379,6 +456,7 @@ function buildHudState(): HudState {
     localPlayerId: server.myId() || "local",
     camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
     teamCoins,
+    phase: phaseState ? `Fase ${phaseState.number}` : undefined,
     status: localDead ? formatDeathMessage() : undefined,
   };
 }

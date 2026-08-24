@@ -201,6 +201,115 @@
         outline: 2px solid rgba(255, 255, 255, 0.7);
         outline-offset: 2px;
       }
+      /* ===== Loja entre fases (apps/web/src/shop.ts) =====
+         Overlay full-screen que cobre o jogo quando a loja abre; some quando
+         todos confirmam 'pronto'. Interativo (pointer-events: auto). */
+      .shop-root {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+        background: rgba(10, 10, 22, 0.92);
+        color: #fff;
+        font-family: system-ui, sans-serif;
+        text-align: center;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .shop-title {
+        margin: 0;
+        font-size: clamp(22px, 5vw, 32px);
+      }
+      .shop-balance {
+        font-size: clamp(16px, 3vw, 20px);
+        font-weight: 600;
+        color: #ffd73c;
+      }
+      .shop-cards {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 14px;
+      }
+      .shop-card {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        width: clamp(140px, 22vw, 190px);
+        padding: 14px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+      }
+      .shop-card-icon {
+        font-size: 30px;
+      }
+      .shop-card-name {
+        font-weight: 700;
+        font-size: 14px;
+      }
+      .shop-card-desc {
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.75);
+        min-height: 30px;
+      }
+      .shop-buy {
+        margin-top: auto;
+        padding: 8px 14px;
+        border: none;
+        border-radius: 8px;
+        background: #2ecc71;
+        color: #062;
+        font-weight: 700;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .shop-buy:disabled {
+        background: rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.45);
+        cursor: not-allowed;
+      }
+      .shop-ready-list {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+      .shop-ready-item {
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .shop-ready {
+        padding: 12px 34px;
+        border: none;
+        border-radius: 999px;
+        background: #2ecc71;
+        color: #062;
+        font-weight: 800;
+        font-size: 17px;
+        cursor: pointer;
+      }
+      .shop-ready:disabled {
+        background: rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.55);
+        cursor: wait;
+      }
+      .shop-error {
+        padding: 6px 14px;
+        border-radius: 8px;
+        background: rgba(231, 76, 60, 0.25);
+        color: #ff8a80;
+        font-size: 13px;
+      }
     </style>
   </head>
   <body>

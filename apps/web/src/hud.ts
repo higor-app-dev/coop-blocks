@@ -147,6 +147,33 @@ export function formatDeathMessage(): string {
   return "💀 Você morreu! Voltando em instantes...";
 }
 
+// ===== Label de fase/mapa =====
+//
+// A seção [data-hud=phase] (canto superior esquerdo) mostra a fase/mapa atual
+// da run. O estado pode fornecer strings prontas ("Fase 1", "Mapa 2") ou
+// números crus (phaseState.number do servidor) — números são rotulados como
+// "Fase N" / "Mapa N" para nunca renderizar um número solto.
+
+/**
+ * Rótulo de fase/mapa exibido no HUD. Retorna "" quando o estado não fornece
+ * nenhum dos dois (a seção fica oculta); strings passam adiante, números são
+ * formatados como "Fase N" / "Mapa N", e os dois lados são unidos por " — "
+ * quando ambos existem.
+ */
+export function formatPhaseLabel(
+  phase?: string | number,
+  map?: string | number
+): string {
+  const parts: string[] = [];
+  if (phase !== undefined && phase !== "") {
+    parts.push(typeof phase === "number" ? `Fase ${phase}` : String(phase));
+  }
+  if (map !== undefined && map !== "") {
+    parts.push(typeof map === "number" ? `Mapa ${map}` : String(map));
+  }
+  return parts.join(" — ");
+}
+
 // ===== Contador de moedas =====
 //
 // O contador tem dois modos, definidos pelos dados que o estado fornece:
@@ -475,10 +502,10 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
   root.appendChild(el);
 
   function update(state: HudState): void {
-    // Fase/mapa — topo, à esquerda (ex.: "📍 Fase 1 — Mapa 2").
-    const phaseText = [state.phase, state.map]
-      .filter((v) => v !== undefined && v !== "")
-      .join(" — ");
+    // Fase/mapa — topo, à esquerda (ex.: "📍 Fase 1 — Mapa 2"). O helper
+    // formata números crus do servidor e devolve "" quando o estado não
+    // fornece nenhum dos dois (seção oculta).
+    const phaseText = formatPhaseLabel(state.phase, state.map);
 
     if (phaseText) {
       phaseEl.textContent = `📍 ${phaseText}`;

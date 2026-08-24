@@ -8,6 +8,7 @@ import {
   formatCoins,
   formatDeathMessage,
   formatHud,
+  formatPhaseLabel,
   formatRespawnLabel,
   hpPercent,
   hudArrows,
@@ -542,6 +543,75 @@ describe("createHud — contador de moedas", () => {
     );
     const panel = byAttr(doc.body, "data-hud", "players")!;
     expect(byClass(panel, "player-coins")).toHaveLength(0);
+  });
+});
+
+// ===== Fase/mapa — label no canto superior esquerdo =====
+
+describe("formatPhaseLabel", () => {
+  it("retorna vazio quando o estado não fornece fase nem mapa", () => {
+    expect(formatPhaseLabel(undefined, undefined)).toBe("");
+    expect(formatPhaseLabel("", "")).toBe("");
+    expect(formatPhaseLabel("Fase 1", "")).toBe("Fase 1");
+  });
+
+  it("passa adiante strings prontas (ex.: 'Fase 1')", () => {
+    expect(formatPhaseLabel("Fase 1", undefined)).toBe("Fase 1");
+    expect(formatPhaseLabel(undefined, "Mapa 2")).toBe("Mapa 2");
+  });
+
+  it("formata número de fase como 'Fase N'", () => {
+    expect(formatPhaseLabel(3, undefined)).toBe("Fase 3");
+  });
+
+  it("formata número de mapa como 'Mapa N' (ex.: 'Map 2')", () => {
+    expect(formatPhaseLabel(undefined, 2)).toBe("Mapa 2");
+  });
+
+  it("junta fase e mapa com separador quando ambos existem", () => {
+    expect(formatPhaseLabel("Fase 1", 2)).toBe("Fase 1 — Mapa 2");
+    expect(formatPhaseLabel(1, 2)).toBe("Fase 1 — Mapa 2");
+  });
+});
+
+describe("createHud — label de fase/mapa", () => {
+  it("esconde a seção quando o estado não fornece fase nem mapa", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudState([]));
+    const phase = byAttr(doc.body, "data-hud", "phase")!;
+    expect(phase.style.display).toBe("none");
+  });
+
+  it("exibe a fase no canto superior esquerdo quando o estado fornece", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ phase: "Fase 1" }));
+    const phase = byAttr(doc.body, "data-hud", "phase")!;
+    expect(phase.textContent).toBe("📍 Fase 1");
+    expect(phase.style.display).toBe("");
+  });
+
+  it("exibe '📍 Mapa N' quando o estado fornece só o número do mapa", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ map: 2 }));
+    const phase = byAttr(doc.body, "data-hud", "phase")!;
+    expect(phase.textContent).toBe("📍 Mapa 2");
+  });
+
+  it("atualiza o rótulo quando o estado muda (avanço de fase)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ phase: "Fase 1", map: 1 }));
+    const phase = byAttr(doc.body, "data-hud", "phase")!;
+    expect(phase.textContent).toBe("📍 Fase 1 — Mapa 1");
+    update(hudStateWith({ phase: "Fase 2", map: 2 }));
+    expect(phase.textContent).toBe("📍 Fase 2 — Mapa 2");
+  });
+
+  it("volta a esconder a seção quando o estado limpa fase/mapa", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ phase: "Fase 1" }));
+    update(hudState([]));
+    const phase = byAttr(doc.body, "data-hud", "phase")!;
+    expect(phase.style.display).toBe("none");
   });
 });
 

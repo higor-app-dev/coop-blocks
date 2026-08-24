@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { connectToServer, type NetOpts } from "./net";
+import { connectToServer, createRemoteInterpolator, type NetOpts } from "./net";
 
 // ===== Fakes =====
 
@@ -431,5 +431,242 @@ describe("connectToServer — envio de tiro (shoot)", () => {
     ws.readyState = 0; // CONNECTING — send() deve ignorar
     server.sendShoot();
     expect(sent).toEqual([]);
+  });
+});
+
+// ===== Interpolação de posições remotas (createRemoteInterpolator) =====
+
+function makeRemoteObj(x: number, y: number, alive = true) {
+  return { pos: { x, y }, exists: () => alive };
+}
+
+interface InterpOpts {
+  bufferMs?: number;
+  snapThreshold?: number;
+  now?: () => number;
+}
+
+/** Cria o interpolador + captura o handler do update loop do kaplay. */
+function makeInterpolator(opts: InterpOpts = {}) {
+  const k = makeK();
+  const clock = { t: 0 };
+  const interp = createRemoteInterpolator(k as any, { now: () => clock.t, ...opts });
+  const step = (k.onUpdate as ReturnType<typeof vi.fn>).mock.calls[0][0] as () => void;
+  return { k, clock, interp, step };
+}
+
+describe("createRemoteInterpolator — interpolação de posições remotas", () => {
+  it("registra exatamente um handler no update loop do kaplay", () => {
+    const k = makeK();
+    createRemoteInterpolator(k as any);
+    expect(k.onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("primeiro alvo após register faz snap (nunca interpola de posição arbitrária)", () => {
+    const { clock, interp, step } = makeInterpolator();
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    clock.t = 100;
+    interp.apply([{ id: "alice", x: 10, y: 5, hp: 100 }]); // delta pequeno — ainda assim snap
+    expect(obj.pos).toEqual({ x: 10, y: 5 });
+    clock.t = 130; // dentro da janela
+    step();
+    expect(obj.pos).toEqual({ x: 10, y: 5 });
+  });
+
+  it("interpola dentro da janela e trava no alvo depois dela", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]); // snap inicial
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]); // alvo (100,0), janela 1000..1100
+    clock.t = 1050; // t = 0.5
+    step();
+    expect(obj.pos.x).toBeCloseTo(50, 5); // smoothstep(0.5) = 0.5 → meio do caminho
+    clock.t = 1090; // t = 0.9
+    step();
+    expect(obj.pos.x).toBeGreaterThan(50);
+    expect(obj.pos.x).toBeLessThan(100);
+    clock.t = 1200; // depois da janela
+    step();
+    expect(obj.pos).toEqual({ x: 100, y: 0 });
+  });
+
+  it("smoothstep suaviza as bordas: menos de 10% do caminho no primeiro 10% do tempo", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]); // dentro do threshold → interpola
+    clock.t = 1010; // t = 0.1 → smoothstep(0.1) = 0.028 → 2.8px de 100
+    step();
+    expect(obj.pos.x).toBeCloseTo(2.8, 5);
+  });
+
+  it("salto maior que o threshold faz snap imediato (anti rubber-banding)", () => {
+    const { clock, interp, step } = makeInterpolator({ snapThreshold: 200 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]); // snap inicial
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 0, y: 300, hp: 100 }]); // 300 > 200 → snap
+    expect(obj.pos).toEqual({ x: 0, y: 300 });
+    clock.t = 1010;
+    step();
+    expect(obj.pos).toEqual({ x: 0, y: 300 }); // permanece no alvo, sem animação
+  });
+
+  it("deslocamento dentro do threshold interpola (não faz snap)", () => {
+    const { clock, interp, step } = makeInterpolator({ snapThreshold: 200, bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]); // 100 <= 200 → interpola
+    clock.t = 1050;
+    step();
+    expect(obj.pos.x).toBeCloseTo(50, 5);
+  });
+
+  it("entidade não registrada guarda o último estado e dá snap no register", () => {
+    const { clock, interp, step } = makeInterpolator();
+    clock.t = 100;
+    interp.apply([{ id: "bob", x: 777, y: 42, hp: 90 }]); // obj ainda não existe
+    const obj = makeRemoteObj(0, 0);
+    interp.register("bob", obj as any);
+    expect(obj.pos).toEqual({ x: 777, y: 42 }); // snap direto para o estado pendente
+    clock.t = 130;
+    step();
+    expect(obj.pos).toEqual({ x: 777, y: 42 });
+  });
+
+  it("unregister remove o tracking (objeto congela onde estava)", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]);
+    interp.unregister("alice");
+    clock.t = 1050;
+    step();
+    expect(obj.pos).toEqual({ x: 0, y: 0 });
+  });
+
+  it("retarget contínuo: novo apply no meio da janela parte da posição interpolada atual", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]);
+    clock.t = 1050;
+    step();
+    expect(obj.pos.x).toBeCloseTo(50, 5);
+    // novo alvo chega: prev = posição interpolada atual (50), target = 200
+    interp.apply([{ id: "alice", x: 200, y: 0, hp: 100 }]);
+    clock.t = 1100; // t = 0.5 da nova janela (50 → 200)
+    step();
+    expect(obj.pos.x).toBeCloseTo(125, 5);
+  });
+
+  it("snap(id) salta imediatamente para o alvo mesmo com delta pequeno", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 80, y: 0, hp: 100 }]); // < threshold → interpola
+    clock.t = 1010;
+    step();
+    expect(obj.pos.x).toBeGreaterThan(0);
+    interp.snap("alice");
+    expect(obj.pos.x).toBe(80);
+    clock.t = 1030;
+    step();
+    expect(obj.pos.x).toBe(80); // permanece no alvo
+  });
+
+  it("objeto destruído é removido do tracking sem quebrar o loop", () => {
+    const { clock, interp, step } = makeInterpolator();
+    const obj = makeRemoteObj(0, 0, false); // exists() = false (destruído)
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 100, y: 0, hp: 100 }]);
+    clock.t = 50;
+    step();
+    expect(interp.get("alice")).toBeUndefined();
+  });
+
+  it("applyPlayer aplica um único jogador (player_join)", () => {
+    const { clock, interp } = makeInterpolator();
+    const obj = makeRemoteObj(0, 0);
+    interp.register("carol", obj as any);
+    clock.t = 10;
+    interp.applyPlayer({ id: "carol", x: 33, y: 44, hp: 100 });
+    expect(obj.pos).toEqual({ x: 33, y: 44 });
+  });
+
+  it("posições não-finitas (NaN) são ignoradas sem quebrar o tracking", () => {
+    const { clock, interp, step } = makeInterpolator({ bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: Number.NaN, y: 0, hp: 100 }]);
+    clock.t = 1050;
+    step();
+    expect(obj.pos).toEqual({ x: 0, y: 0 });
+  });
+
+  it("get devolve o GameObj registrado e undefined para id desconhecido", () => {
+    const { interp } = makeInterpolator();
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    expect(interp.get("alice")).toBe(obj);
+    expect(interp.get("nope")).toBeUndefined();
+  });
+
+  it("distância exatamente no threshold interpola (snap só acima dele)", () => {
+    const { clock, interp, step } = makeInterpolator({ snapThreshold: 200, bufferMs: 100 });
+    const obj = makeRemoteObj(0, 0);
+    interp.register("alice", obj as any);
+    interp.apply([{ id: "alice", x: 0, y: 0, hp: 100 }]);
+    clock.t = 1000;
+    interp.apply([{ id: "alice", x: 200, y: 0, hp: 100 }]); // dist == 200 → interpola
+    clock.t = 1050;
+    step();
+    expect(obj.pos.x).toBeCloseTo(100, 5); // meio do caminho, não snapou
+  });
+
+  it("unregister limpa o estado pendente (re-register não consome snap velho)", () => {
+    const { clock, interp } = makeInterpolator();
+    clock.t = 100;
+    interp.apply([{ id: "bob", x: 777, y: 42, hp: 90 }]); // pendente
+    interp.unregister("bob"); // jogador saiu antes de spawnar
+    const obj = makeRemoteObj(0, 0);
+    interp.register("bob", obj as any);
+    expect(obj.pos).toEqual({ x: 0, y: 0 }); // pendente descartado — sem snap velho
+  });
+
+  it("pendentes órfãos (sem register nem unregister) são podados após o TTL", () => {
+    const { clock, interp, step } = makeInterpolator();
+    clock.t = 1000;
+    interp.apply([{ id: "ghost", x: 50, y: 60, hp: 100 }]); // nunca registrado
+    const obj = makeRemoteObj(0, 0);
+    clock.t = 1000 + 10_000 + 1; // passou do TTL (10s)
+    step();
+    interp.register("ghost", obj as any);
+    expect(obj.pos).toEqual({ x: 0, y: 0 }); // pendente podado — sem snap
+  });
+
+  it("posição do objeto corrompida (NaN) recupera com snap no próximo alvo", () => {
+    const { clock, interp } = makeInterpolator();
+    const obj = makeRemoteObj(Number.NaN, Number.NaN);
+    interp.register("alice", obj as any);
+    clock.t = 100;
+    interp.apply([{ id: "alice", x: 33, y: 44, hp: 100 }]);
+    expect(obj.pos).toEqual({ x: 33, y: 44 }); // snap, sem propagar NaN
   });
 });

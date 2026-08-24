@@ -318,3 +318,192 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
     sendShoot: () => send({ type: "shoot" }),
   };
 }
+
+// ===== Interpolação de posições remotas =====
+
+export interface RemoteInterpolatorOpts {
+  /** Janela de interpolação em ms (default 75) — mascara jitter de rede. */
+  bufferMs?: number;
+  /**
+   * Distância máxima (px) entre a posição atual e o novo alvo para interpolar;
+   * acima dela o snap é imediato (evita rubber-banding). Default 200.
+   */
+  snapThreshold?: number;
+  /** Relógio injetável (ms) — default performance.now(); testes usam relógio fake. */
+  now?: () => number;
+}
+
+/** API do interpolador de posições remotas (mapeamento id → GameObj). */
+export interface RemoteInterpolator {
+  /** Associa um GameObj renderizado a uma entidade remota (id). */
+  register(id: string, obj: GameObj<any>): void;
+  /** Remove a entidade (jogador saiu / mundo reconstruído). */
+  unregister(id: string): void;
+  /** Aplica um broadcast de posições; ids sem GameObj guardam o último estado. */
+  apply(list: NetPlayer[]): void;
+  /** Aplica a posição de UM jogador (player_join / update pontual). */
+  applyPlayer(np: NetPlayer): void;
+  /** Snap imediato para o alvo conhecido (ex.: reconstrução de mundo). */
+  snap(id: string): void;
+  /** GameObj registrado para o id, se houver. */
+  get(id: string): GameObj<any> | undefined;
+}
+
+/** Curva de easing usada na interpolação (acelera/desacelera nas bordas). */
+function smoothstep(t: number): number {
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Interpolador de posições de entidades remotas.
+ *
+ * Mantém por entidade (id) o estado anterior (prev), o alvo (target) e o
+ * instante em que o alvo chegou (recvAt). A cada frame do Kaplay, interpola o
+ * GameObj registrado de prev → target com smoothstep dentro da janela
+ * bufferMs — o movimento fica contínuo mesmo com broadcast jitterado. Se a
+ * distância entre a posição atual e o novo alvo excede snapThreshold, o snap
+ * é imediato (sem rubber-banding); o primeiro alvo de cada entidade também
+ * sempre faz snap (nunca interpola a partir de uma posição arbitrária).
+ *
+ * O mapeamento id → GameObj é registrado via register()/unregister() pelo
+ * main.ts (spawn/removal dos jogadores remotos). Entidades ainda sem GameObj
+ * têm o último estado guardado internamente e fazem snap no register.
+ */
+export function createRemoteInterpolator(
+  k: KAPLAYCtx,
+  opts: RemoteInterpolatorOpts = {}
+): RemoteInterpolator {
+  const bufferMs = opts.bufferMs ?? 75;
+  const snapThreshold = opts.snapThreshold ?? 200;
+  const now = opts.now ?? (() => performance.now());
+
+  interface RemoteTrack {
+    obj: GameObj<any>;
+    prevX: number;
+    prevY: number;
+    targetX: number;
+    targetY: number;
+    /** Instante (ms) em que o alvo atual foi recebido. */
+    recvAt: number;
+    /** false até o primeiro alvo chegar (primeiro apply sempre faz snap). */
+    hasTarget: boolean;
+  }
+
+  const tracks = new Map<string, RemoteTrack>();
+  // Último estado conhecido de ids ainda sem GameObj registrado (o objeto é
+  // criado pelo main.ts depois do broadcast) — vira snap no register. Entradas
+  // antigas (> pendingTtlMs) são podadas no update loop para ids que nunca são
+  // registrados nem desregistrados não vazarem memória.
+  const pending = new Map<string, { np: NetPlayer; at: number }>();
+  const pendingTtlMs = 10_000;
+
+  function snapTrack(track: RemoteTrack, x: number, y: number) {
+    track.obj.pos.x = x;
+    track.obj.pos.y = y;
+    track.prevX = x;
+    track.prevY = y;
+    track.targetX = x;
+    track.targetY = y;
+    track.recvAt = now() - bufferMs; // alvo considerado chegado
+    track.hasTarget = true;
+  }
+
+  function setTarget(track: RemoteTrack, np: NetPlayer) {
+    // Posição do objeto corrompida (NaN) → snap no alvo para não propagar NaN.
+    if (
+      !Number.isFinite(track.obj.pos.x) ||
+      !Number.isFinite(track.obj.pos.y)
+    ) {
+      snapTrack(track, np.x, np.y);
+      return;
+    }
+    const dist = Math.hypot(np.x - track.obj.pos.x, np.y - track.obj.pos.y);
+    if (!track.hasTarget || dist > snapThreshold) {
+      // Primeiro alvo ou salto grande → snap imediato (anti rubber-banding).
+      snapTrack(track, np.x, np.y);
+      return;
+    }
+    // Retarget: parte da posição interpolada atual e anima até o novo alvo.
+    track.prevX = track.obj.pos.x;
+    track.prevY = track.obj.pos.y;
+    track.targetX = np.x;
+    track.targetY = np.y;
+    track.recvAt = now();
+  }
+
+  function applyList(list: NetPlayer[]) {
+    for (const np of list) {
+      if (!np.id || !Number.isFinite(np.x) || !Number.isFinite(np.y)) continue;
+      const track = tracks.get(np.id);
+      if (!track) {
+        pending.set(np.id, { np, at: now() });
+        continue;
+      }
+      setTarget(track, np);
+    }
+  }
+
+  // Interpolação por frame, dentro do update loop do Kaplay.
+  k.onUpdate(() => {
+    const t0 = now();
+    for (const [id, track] of tracks) {
+      // Objeto destruído (ex.: mundo reconstruído) → para de rastrear.
+      if (typeof track.obj.exists === "function" && !track.obj.exists()) {
+        tracks.delete(id);
+        continue;
+      }
+      if (!track.hasTarget) continue;
+      const elapsed = t0 - track.recvAt;
+      if (elapsed >= bufferMs) {
+        track.obj.pos.x = track.targetX;
+        track.obj.pos.y = track.targetY;
+        continue;
+      }
+      const t = smoothstep(elapsed / bufferMs);
+      track.obj.pos.x = track.prevX + (track.targetX - track.prevX) * t;
+      track.obj.pos.y = track.prevY + (track.targetY - track.prevY) * t;
+    }
+    // Poda de pendentes órfãos (ids que nunca viraram GameObj).
+    for (const [id, entry] of pending) {
+      if (t0 - entry.at > pendingTtlMs) pending.delete(id);
+    }
+  });
+
+  return {
+    register(id: string, obj: GameObj<any>) {
+      const p = pending.get(id)?.np;
+      // Consome o pendente: o próximo estado vem do broadcast (apply).
+      if (p) pending.delete(id);
+      tracks.set(id, {
+        obj,
+        prevX: p?.x ?? obj.pos.x,
+        prevY: p?.y ?? obj.pos.y,
+        targetX: p?.x ?? obj.pos.x,
+        targetY: p?.y ?? obj.pos.y,
+        recvAt: now() - bufferMs,
+        hasTarget: false,
+      });
+      if (p) {
+        // Estado pendente do broadcast → snap direto na posição conhecida.
+        obj.pos.x = p.x;
+        obj.pos.y = p.y;
+      }
+    },
+    unregister(id: string) {
+      tracks.delete(id);
+      pending.delete(id);
+    },
+    apply: applyList,
+    applyPlayer(np: NetPlayer) {
+      applyList([np]);
+    },
+    snap(id: string) {
+      const track = tracks.get(id);
+      if (!track) return;
+      snapTrack(track, track.targetX, track.targetY);
+    },
+    get(id: string) {
+      return tracks.get(id)?.obj;
+    },
+  };
+}

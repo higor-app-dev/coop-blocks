@@ -1,7 +1,21 @@
 // Package game mantém o estado do mundo multiplayer (salas e jogadores).
 package game
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
+
+// MaxPlayersPerRoom é a lotação máxima padrão de uma sala.
+const MaxPlayersPerRoom = 4
+
+// Erros retornados pelas operações de lobby/salas.
+var (
+	ErrRoomNotFound      = errors.New("sala não encontrada")
+	ErrRoomAlreadyExists = errors.New("sala já existe")
+	ErrRoomFull          = errors.New("sala cheia")
+	ErrWrongPassword     = errors.New("senha incorreta")
+)
 
 // PlayerState é o estado sincronizado de um jogador.
 type PlayerState struct {
@@ -16,21 +30,70 @@ type Player struct {
 	PlayerState
 }
 
-// Room agrega os jogadores de uma partida.
-type Room struct {
-	mu      sync.RWMutex
-	name    string
-	players map[string]*Player
+// RoomConfig configura a criação de uma sala.
+type RoomConfig struct {
+	Name       string
+	Password   string // vazio = sala pública (sem senha)
+	MaxPlayers int    // 0 = usa MaxPlayersPerRoom
 }
 
+// Room agrega os jogadores de uma partida.
+type Room struct {
+	mu         sync.RWMutex
+	name       string
+	password   string
+	maxPlayers int
+	players    map[string]*Player
+}
+
+// NewRoom cria uma sala pública com a lotação padrão (MaxPlayersPerRoom).
 func NewRoom(name string) *Room {
+	return NewRoomWithConfig(RoomConfig{Name: name})
+}
+
+// NewRoomWithConfig cria uma sala com senha e/ou lotação customizadas.
+// MaxPlayers <= 0 usa o padrão MaxPlayersPerRoom.
+func NewRoomWithConfig(cfg RoomConfig) *Room {
+	max := cfg.MaxPlayers
+	if max <= 0 {
+		max = MaxPlayersPerRoom
+	}
 	return &Room{
-		name:    name,
-		players: make(map[string]*Player),
+		name:       cfg.Name,
+		password:   cfg.Password,
+		maxPlayers: max,
+		players:    make(map[string]*Player),
 	}
 }
 
-// AddPlayer cria (ou retorna) um jogador na sala.
+// Join adiciona um jogador à sala validando senha e lotação máxima.
+// Se o ID já está na sala (reconexão), retorna o jogador existente sem revalidar.
+func (r *Room) Join(id, password string) (*Player, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.players[id]; ok {
+		return p, nil
+	}
+	if r.password != "" && password != r.password {
+		return nil, ErrWrongPassword
+	}
+	if len(r.players) >= r.maxPlayers {
+		return nil, ErrRoomFull
+	}
+	p := &Player{
+		ID: id,
+		PlayerState: PlayerState{
+			X:  96, // spawn inicial (2 tiles * 48)
+			Y:  480,
+			HP: 100,
+		},
+	}
+	r.players[id] = p
+	return p, nil
+}
+
+// AddPlayer cria (ou retorna) um jogador na sala sem checagens de senha/lotação.
+// Mantido para o servidor atual (sala única pública); salas com regras usam Join.
 func (r *Room) AddPlayer(id string) *Player {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -507,3 +507,47 @@ func TestSimDeterminismoPorSeed(t *testing.T) {
 		t.Error("seeds diferentes (42 vs 43) produziram sequências idênticas")
 	}
 }
+
+func TestSimSetMaxHPElevaTetoECuraDelta(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("alice")
+	p := simID(s, "alice")
+
+	if err := s.SetMaxHP("alice", 125); err != nil {
+		t.Fatalf("SetMaxHP: %v", err)
+	}
+	if p.MaxHP != 125 || p.HP != 125 {
+		t.Errorf("HP = %d/%d, want 125/125 (teto elevado + delta curado)", p.HP, p.MaxHP)
+	}
+
+	// baixar o teto é rejeitado (upgrades só sobem)
+	if err := s.SetMaxHP("alice", 100); err == nil {
+		t.Error("SetMaxHP para teto menor deveria rejeitar")
+	}
+	if p.MaxHP != 125 {
+		t.Errorf("MaxHP = %d, want 125 (teto não pode cair)", p.MaxHP)
+	}
+
+	// jogador inexistente
+	if err := s.SetMaxHP("bob", 150); err != ErrPlayerNotFound {
+		t.Errorf("err = %v, want ErrPlayerNotFound", err)
+	}
+}
+
+func TestSimSetMaxHPRespawnUsaTetoElevado(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("alice")
+	if err := s.SetMaxHP("alice", 150); err != nil {
+		t.Fatalf("SetMaxHP: %v", err)
+	}
+	if _, err := s.ApplyDamage("alice", 1000); err != nil {
+		t.Fatalf("ApplyDamage: %v", err)
+	}
+	for i := 0; i <= s.cfg.RespawnTicks && !simID(s, "alice").Alive; i++ {
+		s.Tick()
+	}
+	p := simID(s, "alice")
+	if !p.Alive || p.HP != 150 || p.MaxHP != 150 {
+		t.Errorf("após respawn = %+v, want alive com 150/150 (teto persiste)", p)
+	}
+}

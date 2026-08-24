@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,10 +57,22 @@ func main() {
 	// hostil, e credita as moedas dos drops aos atiradores.
 	sim := game.NewSimDefault(game.NewRandomSource(int64(level.Spec.Seed)))
 
+	// Loja da run: estado de upgrades POR JOGADOR (max_hp, fire_rate, shield)
+	// com carteira individual de moedas delegada ao Sim (SimPlayer.Coins) —
+	// não existe carteira do time. O efeito dos upgrades é aplicado aqui:
+	// max_hp sobe o teto no Sim (persiste no respawn), shield absorve um hit
+	// (applyDamage) e fire_rate reduz o cooldown de tiro (OnShoot).
+	shop := game.NewShopDefault(sim)
+
 	// Aplica dano e reage à morte: zera o contador de moedas DA FASE do
 	// jogador (morte no mapa atual) e broadcasta as contagens. A carteira
-	// persistente/gasta (sim.Coins) não é tocada pela morte.
+	// persistente/gasta (sim.Coins) não é tocada pela morte. Escudo ativo
+	// absorve o hit inteiro (consome a carga, nenhum dano aplicado).
 	applyDamage := func(id string, dmg int) {
+		if shop.AbsorbShield(id) {
+			hub.Broadcast(game.ShieldAbsorbedMsg(id))
+			return
+		}
 		evs, err := sim.ApplyDamage(id, dmg)
 		if err != nil {
 			log.Printf("damage %s: %v", id, err)
@@ -93,10 +106,45 @@ func main() {
 		}
 	})
 
+	// Cooldown de tiro por jogador: a cadência efetiva vem do multiplicador de
+	// fire_rate da loja (1.0 = base 150 ms; +20% por nível de upgrade). O
+	// servidor é autoritativo — clientes não podem spammar tiros além do
+	// intervalo permitido.
+	baseFireInterval := 150 * time.Millisecond
+	var fireMu sync.Mutex
+	lastShot := map[string]time.Time{}
+
 	hub.OnShoot(func(c *ws.Client) {
 		if p, ok := room.GetPlayer(c.ID()); ok {
+			stats := shop.Stats(c.ID())
+			interval := time.Duration(float64(baseFireInterval) / stats.FireRateMultiplier)
+			fireMu.Lock()
+			now := time.Now()
+			if now.Sub(lastShot[c.ID()]) < interval {
+				fireMu.Unlock()
+				return // ainda em cooldown — ignora a intenção de tiro
+			}
+			lastShot[c.ID()] = now
+			fireMu.Unlock()
 			projectiles.Fire(c.ID(), float64(p.X), float64(p.Y), p.Facing)
 		}
+	})
+
+	// Compra na loja: valida o upgrade e o saldo INDIVIDUAL do comprador,
+	// debita só as moedas dele e responde com o comprovante (stats + saldo
+	// restante). max_hp também eleva o teto no Sim (persiste no respawn).
+	hub.OnShopBuy(func(c *ws.Client, upgrade string) {
+		rc, err := shop.Buy(c.ID(), game.UpgradeID(upgrade))
+		if err != nil {
+			hub.SendTo(c, game.ShopBuyResultMsg(false, game.Receipt{}, err.Error()))
+			return
+		}
+		if rc.UpgradeID == game.UpgradeMaxHP {
+			if err := sim.SetMaxHP(c.ID(), rc.Stats.MaxHP); err != nil {
+				log.Printf("shop max_hp %s: %v", c.ID(), err)
+			}
+		}
+		hub.SendTo(c, game.ShopBuyResultMsg(true, rc, ""))
 	})
 
 	hub.OnLeave(func(c *ws.Client) {

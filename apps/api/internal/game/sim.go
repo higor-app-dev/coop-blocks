@@ -298,6 +298,52 @@ func (s *Sim) SpendCoins(id string, n int) ([]Event, error) {
 	return []Event{{Type: EventCoinSpend, PlayerID: id, Amount: n, Tick: s.tick}}, nil
 }
 
+// Balance devolve o saldo de moedas do jogador e false se ele não existe.
+// Implementa CoinWallet (loja): o saldo é INDIVIDUAL — não existe carteira
+// compartilhada do time.
+func (s *Sim) Balance(id string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.players[id]
+	if !ok {
+		return 0, false
+	}
+	return p.Coins, true
+}
+
+// Spend debita moedas do jogador com a mesma semântica de SpendCoins
+// (ErrInsufficientCoins se o saldo não cobrir; nunca fica negativo).
+// Implementa CoinWallet (loja): o débito atinge apenas o saldo do jogador.
+func (s *Sim) Spend(id string, n int) error {
+	_, err := s.SpendCoins(id, n)
+	return err
+}
+
+// SetMaxHP redefine o teto de vida de um jogador (efeito do upgrade max_hp
+// da loja). Só aceita teto MAIOR que o atual (upgrades não caem). Vivo, o
+// delta é curado junto (HP sobe com o teto, cap no novo máximo). O teto
+// elevado persiste no respawn (respawn usa p.MaxHP).
+func (s *Sim) SetMaxHP(id string, maxHP int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.players[id]
+	if !ok {
+		return ErrPlayerNotFound
+	}
+	if maxHP <= p.MaxHP {
+		return errors.New("teto de HP só pode subir (upgrade de max_hp)")
+	}
+	delta := maxHP - p.MaxHP
+	p.MaxHP = maxHP
+	if p.Alive {
+		p.HP += delta // cura o delta; o dano já sofrido continua descontado
+		if p.HP > p.MaxHP {
+			p.HP = p.MaxHP
+		}
+	}
+	return nil
+}
+
 // IsWiped devolve true quando a squad inteira está morta (squad wipe).
 func (s *Sim) IsWiped() bool {
 	s.mu.RLock()

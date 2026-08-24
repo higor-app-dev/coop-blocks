@@ -36,12 +36,13 @@ func (c *Client) SetState(st game.PlayerState) {
 
 // Hub gerencia todas as conexões ativas.
 type Hub struct {
-	mu       sync.RWMutex
-	clients  map[*Client]bool
-	onJoin   func(c *Client)
-	onState  func(c *Client, st game.PlayerState)
-	onShoot  func(c *Client)
-	onLeave  func(c *Client)
+	mu        sync.RWMutex
+	clients   map[*Client]bool
+	onJoin    func(c *Client)
+	onState   func(c *Client, st game.PlayerState)
+	onShoot   func(c *Client)
+	onShopBuy func(c *Client, upgrade string)
+	onLeave   func(c *Client)
 }
 
 func NewHub() *Hub {
@@ -50,10 +51,14 @@ func NewHub() *Hub {
 	}
 }
 
-func (h *Hub) OnJoin(fn func(c *Client))  { h.onJoin = fn }
+func (h *Hub) OnJoin(fn func(c *Client))                       { h.onJoin = fn }
 func (h *Hub) OnState(fn func(c *Client, st game.PlayerState)) { h.onState = fn }
-func (h *Hub) OnShoot(fn func(c *Client)) { h.onShoot = fn }
-func (h *Hub) OnLeave(fn func(c *Client)) { h.onLeave = fn }
+func (h *Hub) OnShoot(fn func(c *Client))                      { h.onShoot = fn }
+
+// OnShopBuy registra o handler de compra na loja: recebe o cliente e o ID do
+// upgrade pedido (string crua — a validação de catálogo é do handler).
+func (h *Hub) OnShopBuy(fn func(c *Client, upgrade string)) { h.onShopBuy = fn }
+func (h *Hub) OnLeave(fn func(c *Client))                   { h.onLeave = fn }
 
 // Broadcast envia uma mensagem JSON para todas as conexões.
 func (h *Hub) Broadcast(msg map[string]any) {
@@ -69,6 +74,20 @@ func (h *Hub) Broadcast(msg map[string]any) {
 		default:
 			// client lento — dropa para não travar o hub
 		}
+	}
+}
+
+// SendTo envia uma mensagem JSON APENAS para a conexão dada (resposta
+// individual, ex.: comprovante de compra da loja para o comprador).
+func (h *Hub) SendTo(c *Client, msg map[string]any) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	select {
+	case c.send <- data:
+	default:
+		// client lento — dropa para não travar o hub
 	}
 }
 
@@ -116,11 +135,12 @@ func (h *Hub) readLoop(c *Client) {
 			return
 		}
 		var msg struct {
-			Type   string `json:"type"`
-			X      int    `json:"x"`
-			Y      int    `json:"y"`
-			HP     int    `json:"hp"`
-			Facing int    `json:"facing"`
+			Type    string `json:"type"`
+			X       int    `json:"x"`
+			Y       int    `json:"y"`
+			HP      int    `json:"hp"`
+			Facing  int    `json:"facing"`
+			Upgrade string `json:"upgrade"`
 		}
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
@@ -134,6 +154,12 @@ func (h *Hub) readLoop(c *Client) {
 			// intenção de tiro — o servidor cria o projétil (autoritativo).
 			if h.onShoot != nil {
 				h.onShoot(c)
+			}
+		case "shop_buy":
+			// intenção de compra na loja — o handler do servidor valida o
+			// upgrade, debita a carteira do comprador e responde individual.
+			if h.onShopBuy != nil {
+				h.onShopBuy(c, msg.Upgrade)
 			}
 		}
 	}

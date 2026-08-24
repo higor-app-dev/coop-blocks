@@ -65,3 +65,39 @@ func CoinsMsg(coins []CoinState, removed []CoinRemoved, counts map[string]int) m
 		"counts":  counts,
 	}
 }
+
+// ShopBuyResultMsg é a resposta INDIVIDUAL de uma compra na loja (enviada só
+// ao comprador): ok=true com o comprovante (upgrade comprado, nível, custo,
+// saldo restante e estatísticas atualizadas) ou ok=false com o motivo
+// (moedas insuficientes, upgrade inválido, etc.).
+func ShopBuyResultMsg(ok bool, rc Receipt, errMsg string) map[string]any {
+	if !ok {
+		return map[string]any{
+			"type":  "shop_buy_result",
+			"ok":    false,
+			"error": errMsg,
+		}
+	}
+	return map[string]any{
+		"type":    "shop_buy_result",
+		"ok":      true,
+		"upgrade": string(rc.UpgradeID),
+		"level":   rc.Level,
+		"cost":    rc.Cost,
+		"coins":   rc.Coins,
+		"stats": map[string]any{
+			"maxHp":    rc.Stats.MaxHP,
+			"fireRate": rc.Stats.FireRateMultiplier,
+			"shield":   rc.Stats.ShieldCharges,
+		},
+	}
+}
+
+// ShieldAbsorbedMsg é o broadcast de que o escudo de um jogador absorveu um
+// hit (carga consumida) — o client toca o efeito visual e atualiza o HUD.
+func ShieldAbsorbedMsg(playerID string) map[string]any {
+	return map[string]any{
+		"type": "shield_absorbed",
+		"id":   playerID,
+	}
+}

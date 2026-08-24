@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MUTE_STORAGE_KEY,
   arrowView,
+  bossBarView,
+  bossPercent,
   clampArrowPoint,
   clampHp,
   createHud,
+  formatBossLabel,
   formatCoins,
   formatDeathMessage,
   formatHud,
@@ -17,6 +20,7 @@ import {
   playerAbbr,
   playerRowView,
   saveMutedSession,
+  type HudBoss,
   type HudPlayer,
   type HudState,
 } from "./hud";
@@ -101,6 +105,85 @@ describe("formatCoins", () => {
 
   it("trunca valores fracionários", () => {
     expect(formatCoins(7.9)).toBe("🪙 7");
+  });
+});
+
+// ===== Barra de HP do boss — helpers puros =====
+
+describe("bossPercent", () => {
+  const boss = (over: Partial<HudBoss> = {}): HudBoss => ({
+    hp: 400,
+    maxHp: 400,
+    ...over,
+  });
+
+  it("100% com HP cheio", () => {
+    expect(bossPercent(boss())).toBe(100);
+  });
+
+  it("proporcional ao meio da faixa", () => {
+    expect(bossPercent(boss({ hp: 200, maxHp: 400 }))).toBe(50);
+    expect(bossPercent(boss({ hp: 300, maxHp: 400 }))).toBe(75);
+  });
+
+  it("0% com HP zerado", () => {
+    expect(bossPercent(boss({ hp: 0 }))).toBe(0);
+  });
+
+  it("clampa acima do maxHp e abaixo de 0", () => {
+    expect(bossPercent(boss({ hp: 500, maxHp: 400 }))).toBe(100);
+    expect(bossPercent(boss({ hp: -10, maxHp: 400 }))).toBe(0);
+  });
+
+  it("maxHp 0 não divide por zero", () => {
+    expect(bossPercent(boss({ hp: 0, maxHp: 0 }))).toBe(0);
+  });
+});
+
+describe("formatBossLabel", () => {
+  it("sem fase → rótulo simples do boss", () => {
+    expect(formatBossLabel()).toBe("👹 BOSS");
+    expect(formatBossLabel(undefined)).toBe("👹 BOSS");
+  });
+
+  it("com fase → rótulo com contexto", () => {
+    expect(formatBossLabel(5)).toBe("👹 BOSS — Fase 5");
+    expect(formatBossLabel(10)).toBe("👹 BOSS — Fase 10");
+  });
+
+  it("fase zerada ou negativa cai no rótulo simples (fase não informada)", () => {
+    expect(formatBossLabel(0)).toBe("👹 BOSS");
+    expect(formatBossLabel(-1)).toBe("👹 BOSS");
+  });
+});
+
+describe("bossBarView", () => {
+  it("deriva rótulo, HP clampado e percentual", () => {
+    const view = bossBarView({ hp: 168, maxHp: 400, phase: 5 });
+    expect(view.label).toBe("👹 BOSS — Fase 5");
+    expect(view.hp).toBe(168);
+    expect(view.maxHp).toBe(400);
+    expect(view.percent).toBe(42);
+  });
+
+  it("estado investida/salto mapeia para classe própria", () => {
+    expect(bossBarView({ hp: 300, maxHp: 400, state: "investida" }).stateClass).toBe(
+      "is-investida"
+    );
+    expect(bossBarView({ hp: 300, maxHp: 400, state: "salto" }).stateClass).toBe(
+      "is-salto"
+    );
+  });
+
+  it("estado idle ou desconhecido não carrega classe", () => {
+    expect(bossBarView({ hp: 300, maxHp: 400, state: "idle" }).stateClass).toBe("");
+    expect(bossBarView({ hp: 300, maxHp: 400, state: "zzz" }).stateClass).toBe("");
+    expect(bossBarView({ hp: 300, maxHp: 400 }).stateClass).toBe("");
+  });
+
+  it("clampa HP fora da faixa no view", () => {
+    expect(bossBarView({ hp: -5, maxHp: 400 }).hp).toBe(0);
+    expect(bossBarView({ hp: 900, maxHp: 400 }).hp).toBe(400);
   });
 });
 
@@ -543,6 +626,62 @@ describe("createHud — contador de moedas", () => {
     );
     const panel = byAttr(doc.body, "data-hud", "players")!;
     expect(byClass(panel, "player-coins")).toHaveLength(0);
+  });
+});
+
+// ===== Barra de HP do boss — render via createHud/update =====
+
+describe("createHud — barra de HP do boss", () => {
+  it("aparece com boss ativo: rótulo, preenchimento e números", () => {
+    const { update } = createHud({ root: doc.body });
+    update(
+      hudStateWith({
+        boss: { hp: 168, maxHp: 400, phase: 5, state: "investida" },
+      })
+    );
+    const boss = byAttr(doc.body, "data-hud", "boss")!;
+    expect(boss.style.display).toBe("");
+    expect(byClass(boss, "boss-label")[0].textContent).toBe("👹 BOSS — Fase 5");
+    expect(byClass(boss, "boss-hp")[0].textContent).toBe("168/400");
+    const fill = byClass(boss, "boss-fill")[0];
+    expect(fill.style.width).toBe("42%");
+    expect(fill.className).toContain("is-investida");
+  });
+
+  it("fica oculta sem boss ativo (estado sem o campo boss)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudState([]));
+    const boss = byAttr(doc.body, "data-hud", "boss")!;
+    expect(boss.style.display).toBe("none");
+  });
+
+  it("atualiza em tempo real conforme o dano (mesmo elemento, sem duplicar)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ boss: { hp: 400, maxHp: 400, phase: 5 } }));
+    const boss = byAttr(doc.body, "data-hud", "boss")!;
+    expect(byClass(boss, "boss-fill")).toHaveLength(1);
+    expect(byClass(boss, "boss-fill")[0].style.width).toBe("100%");
+    update(hudStateWith({ boss: { hp: 200, maxHp: 400, phase: 5 } }));
+    expect(byClass(boss, "boss-fill")).toHaveLength(1);
+    expect(byClass(boss, "boss-fill")[0].style.width).toBe("50%");
+    expect(byClass(boss, "boss-hp")[0].textContent).toBe("200/400");
+  });
+
+  it("some quando o boss é derrotado (broadcast null → estado sem boss)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ boss: { hp: 400, maxHp: 400, phase: 5 } }));
+    const boss = byAttr(doc.body, "data-hud", "boss")!;
+    expect(boss.style.display).toBe("");
+    update(hudState([]));
+    expect(boss.style.display).toBe("none");
+  });
+
+  it("barra com HP zerado mostra 0% (estado residual antes do broadcast null)", () => {
+    const { update } = createHud({ root: doc.body });
+    update(hudStateWith({ boss: { hp: 0, maxHp: 400, phase: 5 } }));
+    const boss = byAttr(doc.body, "data-hud", "boss")!;
+    expect(byClass(boss, "boss-fill")[0].style.width).toBe("0%");
+    expect(byClass(boss, "boss-hp")[0].textContent).toBe("0/400");
   });
 });
 

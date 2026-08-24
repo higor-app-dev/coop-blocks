@@ -594,17 +594,33 @@ function buildHudState(): HudState {
     });
   }
 
-  return {
-    players,
-    localPlayerId: server.myId() || "local",
-    camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
-    teamCoins,
-    // Sem servidor (singleplayer local offline), a fase exibida é a local
-    // (currentLevelNumber) — o broadcast da run é quem manda no multiplayer.
-    phase: phaseState ? `Fase ${phaseState.number}` : `Fase ${currentLevelNumber}`,
-    status: localDead ? formatDeathMessage() : undefined,
-  };
-}
+    // Boss da fase (fases múltiplas de 5): a barra do HUD aparece quando o
+    // servidor broadcasta um boss ativo e some quando ele é derrotado
+    // (broadcast null → hp()/maxHp() voltam a null → boss undefined). O
+    // estado/phase alimentam o rótulo e a cor da barra. hp/maxHp são lidos
+    // uma vez (a cada frame) — a guarda usa os MESMOS valores do objeto.
+    const bossHp = bossLayer.hp();
+    const bossMaxHp = bossLayer.maxHp();
+    const boss = bossHp !== null && bossMaxHp !== null
+      ? {
+          hp: bossHp,
+          maxHp: bossMaxHp,
+          phase: bossLayer.phase() ?? undefined,
+          state: bossLayer.state() ?? undefined,
+        }
+      : undefined;
+    return {
+      players,
+      localPlayerId: server.myId() || "local",
+      camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
+      teamCoins,
+      // Sem servidor (singleplayer local offline), a fase exibida é a local
+      // (currentLevelNumber) — o broadcast da run é quem manda no multiplayer.
+      phase: phaseState ? `Fase ${phaseState.number}` : `Fase ${currentLevelNumber}`,
+      status: localDead ? formatDeathMessage() : undefined,
+      boss,
+    };
+  }
 
 // ===== Loop: input por frame + poeira de aterrissagem + câmera + HUD =====
 // O input é consumido via poll() UMA vez por frame: o snapshot traz a

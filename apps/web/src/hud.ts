@@ -16,6 +16,7 @@
  *     div.hud-phase   [data-hud="phase"]    fase/mapa (canto sup. esquerdo)
  *     div.hud-coins   [data-hud="coins"]    moedas da equipe (sup. direito)
  *     div.hud-status  [data-hud="status"]   mensagem transitória (centro-topo)
+ *     div.hud-boss    [data-hud="boss"]     barra de HP do boss (topo, centro)
  *     div.hud-players [data-hud="players"]  painel de HP dos jogadores + moedas individuais
  *     div.hud-arrows  [data-hud="arrows"]   camada de setas de direção (vazia até o subtask de setas)
  *     button.hud-mute [data-hud="mute"]     mute de áudio (🔊/🔇, pointer-events: auto)
@@ -76,6 +77,8 @@ export interface HudState {
   map?: string | number;
   /** Mensagem de status transitória (conexão, morte, ...). */
   status?: string;
+  /** Boss ativo da fase (opcional — a barra no topo só aparece quando presente). */
+  boss?: HudBoss;
 }
 
 /** Instância do HUD retornada por `createHud`. */
@@ -191,6 +194,73 @@ export function formatPhaseLabel(
 export function formatCoins(coins?: number): string {
   if (coins === undefined) return "";
   return `🪙 ${Math.max(0, Math.floor(coins))}`;
+}
+
+// ===== Barra de HP do boss =====
+//
+// A seção [data-hud=boss] (topo, centro) aparece quando há um boss ativo na
+// fase (fases múltiplas de 5 — broadcast do servidor): rótulo do boss + barra
+// de vida preenchida conforme hp/maxHp + indicador numérico. A barra some
+// quando o servidor anuncia o fim do boss (derrota → broadcast null), então
+// a regra de exibição é simples: boss presente = visível, ausente = oculta.
+
+/** Estado do boss para a barra do HUD — espelho do broadcast do servidor. */
+export interface HudBoss {
+  /** HP atual do boss (0..maxHp). */
+  hp: number;
+  /** HP máximo do boss (nunca 0 em jogo — servidor define 400). */
+  maxHp: number;
+  /** Fase em que o boss apareceu (opcional — rótulo com contexto). */
+  phase?: number;
+  /** Estado da máquina ("idle" | "investida" | "salto") — opcional; muda a cor da barra. */
+  state?: string;
+}
+
+/**
+ * Percentual de vida do boss exibido na barra (0–100, clamp).
+ * maxHp <= 0 nunca divide por zero (estado indefinido → barra vazia).
+ */
+export function bossPercent(b: HudBoss): number {
+  if (b.maxHp <= 0) return 0;
+  return Math.round((clampHp(b.hp, b.maxHp) / b.maxHp) * 100);
+}
+
+/**
+ * Rótulo do boss exibido na barra. "👹 BOSS" (simples) quando a fase não é
+ * informada; "👹 BOSS — Fase N" quando a fase veio no broadcast (contexto de
+ * qual fase o boss pertence — fases múltiplas de 5).
+ */
+export function formatBossLabel(phase?: number): string {
+  if (phase !== undefined && phase > 0) return `👹 BOSS — Fase ${phase}`;
+  return "👹 BOSS";
+}
+
+/** Visão derivada do boss para a barra — pura e testável. */
+export interface BossBarView {
+  /** Rótulo exibido (ex.: "👹 BOSS — Fase 5"). */
+  label: string;
+  /** HP exibido (clampado em [0, maxHp]). */
+  hp: number;
+  maxHp: number;
+  /** Percentual de preenchimento da barra (0–100). */
+  percent: number;
+  /**
+   * Classe extra do preenchimento por estado da máquina ("" | "is-investida"
+   * | "is-salto") — o CSS troca a cor da barra conforme o perigo do ataque.
+   */
+  stateClass: string;
+}
+
+/** Deriva a visão de exibição do boss a partir do estado bruto. */
+export function bossBarView(b: HudBoss): BossBarView {
+  return {
+    label: formatBossLabel(b.phase),
+    hp: clampHp(b.hp, b.maxHp),
+    maxHp: b.maxHp,
+    percent: bossPercent(b),
+    stateClass:
+      b.state === "investida" || b.state === "salto" ? `is-${b.state}` : "",
+  };
 }
 
 // ===== Painel de jogadores — helpers puros (testáveis) =====
@@ -477,6 +547,21 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
   const playersEl = section("hud-players", "players");
   const arrowsEl = section("hud-arrows", "arrows");
 
+  // Barra de HP do boss (topo, centro): rótulo + barra + números. Os
+  // elementos nascem uma vez e são atualizados no lugar a cada frame —
+  // a seção inteira só fica visível quando o estado fornece `boss`.
+  const bossEl = section("hud-boss", "boss");
+  const bossLabel = document.createElement("span");
+  bossLabel.className = "boss-label";
+  const bossBar = document.createElement("div");
+  bossBar.className = "boss-bar";
+  const bossFill = document.createElement("div");
+  bossFill.className = "boss-fill";
+  bossBar.appendChild(bossFill);
+  const bossHp = document.createElement("span");
+  bossHp.className = "boss-hp";
+  bossEl.append(bossLabel, bossBar, bossHp);
+
   // Botão de mute: estado visual sincronizado, clique chama onMuteToggle.
   // O overlay raiz tem pointer-events: none (para não bloquear o jogo); o
   // botão reabilita pointer-events via classe CSS .hud-mute.
@@ -498,7 +583,7 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
     opts.onMuteToggle?.(muted);
   });
 
-  el.append(phaseEl, coinsEl, statusEl, playersEl, arrowsEl, muteBtn);
+  el.append(phaseEl, coinsEl, statusEl, bossEl, playersEl, arrowsEl, muteBtn);
   root.appendChild(el);
 
   function update(state: HudState): void {
@@ -529,6 +614,23 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
       statusEl.style.display = "";
     } else {
       statusEl.style.display = "none";
+    }
+
+    // Barra de HP do boss — topo, centro. Aparece quando há boss ativo na
+    // fase (broadcast do servidor em fases múltiplas de 5) e some quando ele
+    // é derrotado/removido (broadcast null → estado sem o campo `boss`).
+    // Rótulo + preenchimento (com a cor do estado da máquina) + números.
+    if (state.boss) {
+      const view = bossBarView(state.boss);
+      bossLabel.textContent = view.label;
+      bossHp.textContent = `${view.hp}/${view.maxHp}`;
+      bossFill.style.width = `${view.percent}%`;
+      bossFill.className = view.stateClass
+        ? `boss-fill ${view.stateClass}`
+        : "boss-fill";
+      bossEl.style.display = "";
+    } else {
+      bossEl.style.display = "none";
     }
 
     // O botão de mute está sempre presente e é interativo — o overlay nunca

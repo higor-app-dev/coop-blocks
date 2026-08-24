@@ -146,6 +146,52 @@
         color: #ff8a80;
         text-align: right;
       }
+      /* Barra de HP do boss — topo, centro (apps/web/src/hud.ts).
+         Aparece quando há boss ativo na fase (fases múltiplas de 5) e some
+         quando ele é derrotado (broadcast null do servidor). A cor do
+         preenchimento acompanha o estado da máquina: vermelho parado,
+         vermelho vivo na investida e laranja no salto (BOSS_COLORS). */
+      .hud-root .hud-boss {
+        top: max(44px, calc(env(safe-area-inset-top) + 36px));
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 260px;
+        max-width: 70vw;
+      }
+      .hud-root .boss-label {
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .hud-root .boss-bar {
+        flex: 1;
+        height: 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.15);
+        overflow: hidden;
+      }
+      .hud-root .boss-fill {
+        height: 100%;
+        border-radius: 999px;
+        background: rgb(176, 52, 52);
+        transition: width 0.15s linear;
+      }
+      .hud-root .boss-fill.is-investida {
+        background: rgb(238, 70, 70);
+      }
+      .hud-root .boss-fill.is-salto {
+        background: rgb(210, 130, 48);
+      }
+      .hud-root .boss-hp {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.85);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        min-width: 52px;
+      }
       /* Camada de setas de direção (preenchida pelo subtask de setas) */
       .hud-root .hud-arrows {
         inset: 0;

@@ -7,13 +7,42 @@ import { ACTION_KEYS, keyToAction } from "./input";
 import { formatDeathMessage, formatHud } from "./hud";
 
 // ===== Configuração do jogo =====
+// Canvas dentro do container #app (100% da viewport). letterbox mantém a
+// proporção 960x540 com barras pretas em qualquer viewport; pixelDensity
+// limita a resolução do buffer em telas retina (nítido sem matar a GPU).
 const k = kaplay({
   width: 960,
   height: 540,
   letterbox: true,
   background: [18, 18, 30],
   global: false,
+  root: document.getElementById("app")!,
+  pixelDensity: Math.min(window.devicePixelRatio || 1, 2),
 });
+
+// ===== Canvas responsivo: reconfigura em resize/orientação =====
+// O Kaplay 3001 já re-letterboxa sozinho (ResizeObserver interno no canvas +
+// recompute do viewport). Aqui só reforçamos o buffer na resolução atual do
+// container e re-medimos após mudança de orientação (iOS atrasa o resize do
+// layout, então um rAF + timeout cobre o intervalo). Idempotente com o
+// handler interno — os valores convergem para os mesmos.
+function refitCanvas() {
+  const c = k.canvas;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.round(c.offsetWidth * dpr);
+  const h = Math.round(c.offsetHeight * dpr);
+  if (c.width !== w || c.height !== h) {
+    c.width = w;
+    c.height = h;
+  }
+}
+let refitRaf = 0;
+function scheduleRefit() {
+  cancelAnimationFrame(refitRaf);
+  refitRaf = requestAnimationFrame(refitCanvas);
+}
+window.addEventListener("resize", scheduleRefit);
+window.addEventListener("orientationchange", () => setTimeout(scheduleRefit, 150));
 
 const {
   add,

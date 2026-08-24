@@ -147,6 +147,107 @@ export function formatDeathMessage(): string {
   return "💀 Você morreu! Voltando em instantes...";
 }
 
+// ===== Painel de jogadores — helpers puros (testáveis) =====
+
+/**
+ * Percentual de HP exibido na barra do painel (0–100, clamp).
+ * maxHp <= 0 nunca divide por zero (estado indefinido → barra vazia).
+ */
+export function hpPercent(p: HudPlayer): number {
+  if (p.maxHp <= 0) return 0;
+  return Math.round((clampHp(p.hp, p.maxHp) / p.maxHp) * 100);
+}
+
+/**
+ * Rótulo do estado de respawn com contagem regressiva.
+ * - Sem timer informado (ou zerado/negativo): rótulo genérico de espera.
+ * - Com timer: segundos arredondados para cima, clampados em 3s (teto do
+ *   servidor — DefaultRespawnTicks = 60 ticks @ 20 tps = 3 s).
+ */
+export function formatRespawnLabel(respawnIn?: number): string {
+  if (respawnIn === undefined || respawnIn <= 0) return "💀 respawn...";
+  return `💀 ${Math.min(3, Math.ceil(respawnIn))}s`;
+}
+
+/** true = jogador fora de combate (morto ou aguardando respawn). */
+export function isPlayerDown(p: HudPlayer): boolean {
+  return p.respawning === true || p.hp <= 0;
+}
+
+/** Visão derivada de um jogador para o painel — pura e testável. */
+export interface PlayerRowView {
+  name: string;
+  color: string;
+  /** HP exibido (clampado em [0, maxHp]). */
+  hp: number;
+  maxHp: number;
+  /** Percentual de preenchimento da barra (0–100). */
+  percent: number;
+  /** true = morto/aguardando respawn (barra trocada pelo estado de espera). */
+  down: boolean;
+  /** true = jogador local (destacado na lista). */
+  local: boolean;
+  /** Rótulo de respawn com contagem (vazio quando vivo). */
+  respawnLabel: string;
+}
+
+/** Deriva a visão de exibição de um jogador a partir do estado bruto. */
+export function playerRowView(p: HudPlayer, localPlayerId: string): PlayerRowView {
+  const down = isPlayerDown(p);
+  return {
+    name: p.name,
+    color: p.color,
+    hp: clampHp(p.hp, p.maxHp),
+    maxHp: p.maxHp,
+    percent: hpPercent(p),
+    down,
+    local: p.id === localPlayerId,
+    respawnLabel: down ? formatRespawnLabel(p.respawnIn) : "",
+  };
+}
+
+/** Constrói a linha do painel de um jogador (nome + barra de HP + respawn). */
+function renderPlayerRow(p: HudPlayer, localPlayerId: string): HTMLDivElement {
+  const view = playerRowView(p, localPlayerId);
+
+  const row = document.createElement("div");
+  row.className = view.local ? "player-row is-local" : "player-row";
+  row.setAttribute("data-player-id", p.id);
+
+  const name = document.createElement("span");
+  name.className = "player-name";
+  name.textContent = view.name;
+  name.style.color = view.color;
+
+  const hp = document.createElement("span");
+  hp.className = "player-hp";
+  hp.textContent = `${view.hp}/${view.maxHp}`;
+
+  const bar = document.createElement("div");
+  bar.className = "player-bar";
+  const fill = document.createElement("div");
+  fill.className = "player-fill";
+  fill.style.width = `${view.percent}%`;
+  fill.style.background = view.color;
+  bar.appendChild(fill);
+
+  // Ordem = grid do CSS (auto | minmax(70px,1fr) | auto): nome fixo,
+  // barra flexível no meio, números à direita.
+  row.append(name, bar, hp);
+
+  // Morto/aguardando respawn: a barra é ocultada via CSS (.is-down) e o
+  // estado de espera com contagem aparece no lugar.
+  if (view.down) {
+    row.classList.add("is-down");
+    const respawn = document.createElement("div");
+    respawn.className = "player-respawn";
+    respawn.textContent = view.respawnLabel;
+    row.appendChild(respawn);
+  }
+
+  return row;
+}
+
 // ===== Overlay DOM =====
 
 const SECTION_ATTR = "data-hud";
@@ -234,8 +335,15 @@ export function createHud(opts: CreateHudOpts = {}): Hud {
     // fica aria-hidden (seções vazias não são anunciadas, pois não têm texto).
     el.setAttribute("aria-hidden", "false");
 
-    // Seções de placar (players) e setas (arrows) ficam vazias até os
-    // subtasks de feature implementarem o render em cima do mesmo state.
+    // Painel de HP: uma linha por jogador da sala (local incluso e
+    // destacado). Mortos/aguardando respawn trocam a barra pelo estado de
+    // espera com contagem regressiva (quando o estado fornece o timer).
+    playersEl.replaceChildren(
+      ...state.players.map((p) => renderPlayerRow(p, state.localPlayerId))
+    );
+
+    // Seções de setas (arrows) ficam vazias até o subtask de setas
+    // implementar o render em cima do mesmo state.
   }
 
   function destroy(): void {

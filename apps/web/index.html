@@ -82,6 +82,60 @@
         background: none;
         padding: 0;
       }
+      /* Linha do painel: nome (cor do jogador) + barra de HP + números.
+         A coluna do meio (barra) encolhe; nome e HP ficam fixos. */
+      .hud-root .player-row {
+        display: grid;
+        grid-template-columns: auto minmax(70px, 1fr) auto;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        border: 1px solid transparent;
+      }
+      /* Jogador local: borda clara para identificação imediata. */
+      .hud-root .player-row.is-local {
+        border-color: rgba(255, 255, 255, 0.85);
+        outline: 1px solid rgba(255, 255, 255, 0.35);
+      }
+      .hud-root .player-name {
+        font-weight: 700;
+        font-size: 12px;
+        max-width: 110px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .hud-root .player-hp {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.8);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-root .player-bar {
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.15);
+        overflow: hidden;
+      }
+      .hud-root .player-fill {
+        height: 100%;
+        border-radius: 999px;
+        transition: width 0.15s linear;
+      }
+      /* Morto/aguardando respawn: barra e números somem, aparece a
+         contagem regressiva (ou rótulo genérico de espera). */
+      .hud-root .player-row.is-down .player-bar,
+      .hud-root .player-row.is-down .player-hp {
+        display: none;
+      }
+      .hud-root .player-respawn {
+        grid-column: 2 / 4;
+        font-size: 12px;
+        font-weight: 600;
+        color: #ff8a80;
+        text-align: right;
+      }
       /* Camada de setas de direção (preenchida pelo subtask de setas) */
       .hud-root .hud-arrows {
         inset: 0;

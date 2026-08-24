@@ -128,6 +128,9 @@ const hud = createHud({
   },
 });
 let localDead = false;
+// Marco (performance.now) de quando o jogador local morreu — alimenta a
+// contagem regressiva do respawn no painel do HUD. Zerado ao voltar à vida.
+let localDeadSince = 0;
 
 // ===== Inicialização do áudio no primeiro gesto =====
 // A política de autoplay dos browsers deixa o AudioContext suspenso até um
@@ -339,6 +342,14 @@ function buildHudState(): HudState {
   const cam = k.getCamPos();
 
   if (player.exists()) {
+    // Respawn local: o servidor revive após 3s (DefaultRespawnTicks) — o
+    // painel do HUD mostra a contagem regressiva enquanto morto.
+    const now = performance.now();
+    if (localDead) {
+      if (localDeadSince === 0) localDeadSince = now;
+    } else {
+      localDeadSince = 0;
+    }
     players.push({
       id: server.myId() || "local",
       name: "Você",
@@ -347,6 +358,8 @@ function buildHudState(): HudState {
       maxHp: MAX_HP,
       x: player.pos.x,
       y: player.pos.y,
+      respawning: localDead,
+      respawnIn: localDead ? Math.max(0, 3 - (now - localDeadSince) / 1000) : undefined,
     });
   }
   for (const np of netPlayers) {

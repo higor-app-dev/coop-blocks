@@ -3,13 +3,15 @@ package game
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 )
 
 // genLevels são os níveis exercitados nos testes do gerador progressivo
 // (Generate/generateGrid). Cobrem a rampa de dificuldade: fase 1 (paridade
-// com o espelho), fases médias e fases altas.
-var genLevels = []int{1, 2, 3, 5, 8}
+// com o espelho), fases médias, fases altas e o nível 10 do critério do
+// ticket de testes.
+var genLevels = []int{1, 2, 3, 5, 8, 10}
 
 // genLvl gera o grid e o Level para (seed, nível), falhando o teste em erro.
 func genLvl(t *testing.T, seed uint64, level int) (*Level, *genGrid) {
@@ -378,6 +380,24 @@ func TestGenerateSpawnsValidos(t *testing.T) {
 			}
 			check("inimigo", l.EnemySpawns)
 			check("moeda", l.CoinSpawns)
+		}
+	}
+}
+
+// TestGenerateReflectDeepEqual: critério do ticket de testes — a MESMA seed e
+// fase geram mapas IDÊNTICOS via reflect.DeepEqual (Level completo, não só a
+// assinatura), nos níveis 1, 5 e 10 do critério.
+func TestGenerateReflectDeepEqual(t *testing.T) {
+	for _, level := range []int{1, 5, 10} {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("level_%d_seed_%d", level, seed)
+			t.Run(name, func(t *testing.T) {
+				l1, _ := genLvl(t, uint64(seed), level)
+				l2, _ := genLvl(t, uint64(seed), level)
+				if !reflect.DeepEqual(l1, l2) {
+					t.Fatal("reflect.DeepEqual: mesma seed+level gerou Levels diferentes")
+				}
+			})
 		}
 	}
 }

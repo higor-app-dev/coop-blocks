@@ -284,3 +284,100 @@ func TestGenerateNivelInvalido(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateSpawnsDeterminismo: inimigos e moedas são determinísticos por
+// (seed, level) — mesmas posições na mesma seed+level; seeds diferentes
+// produzem posições diferentes (varredura da fase 3).
+func TestGenerateSpawnsDeterminismo(t *testing.T) {
+	for _, level := range genLevels {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("level_%d_seed_%d", level, seed)
+			t.Run(name, func(t *testing.T) {
+				l1, _ := genLvl(t, uint64(seed), level)
+				l2, _ := genLvl(t, uint64(seed), level)
+				if len(l1.EnemySpawns) != len(l2.EnemySpawns) || len(l1.CoinSpawns) != len(l2.CoinSpawns) {
+					t.Fatalf("mesma seed+level gerou quantidades diferentes")
+				}
+				for i := range l1.EnemySpawns {
+					if l1.EnemySpawns[i] != l2.EnemySpawns[i] {
+						t.Fatalf("inimigo %d difere: %+v vs %+v", i, l1.EnemySpawns[i], l2.EnemySpawns[i])
+					}
+				}
+				for i := range l1.CoinSpawns {
+					if l1.CoinSpawns[i] != l2.CoinSpawns[i] {
+						t.Fatalf("moeda %d difere: %+v vs %+v", i, l1.CoinSpawns[i], l2.CoinSpawns[i])
+					}
+				}
+			})
+		}
+	}
+	// Seeds diferentes variam (fase 3).
+	sigEnemies := map[string]uint32{}
+	sigCoins := map[string]uint32{}
+	for _, seed := range testSeeds {
+		l, _ := genLvl(t, uint64(seed), 3)
+		var e, c string
+		for _, s := range l.EnemySpawns {
+			e += fmt.Sprintf(";%d,%d", s.X, s.Y)
+		}
+		for _, s := range l.CoinSpawns {
+			c += fmt.Sprintf(";%d,%d", s.X, s.Y)
+		}
+		if prev, ok := sigEnemies[e]; ok && e != "" {
+			t.Errorf("seeds %d e %d geraram os MESMOS inimigos", prev, seed)
+		}
+		if prev, ok := sigCoins[c]; ok && c != "" {
+			t.Errorf("seeds %d e %d geraram as MESMAS moedas", prev, seed)
+		}
+		sigEnemies[e] = seed
+		sigCoins[c] = seed
+	}
+}
+
+// TestGenerateSpawnsEscalonam: quantidades de inimigos e moedas crescem com a
+// fase — inimigos = level+1 e moedas = level*2+3 (ou fórmulas claramente
+// crescentes), para qualquer seed.
+func TestGenerateSpawnsEscalonam(t *testing.T) {
+	for _, level := range genLevels {
+		l, _ := genLvl(t, 42, level)
+		if got, want := len(l.EnemySpawns), level+1; got != want {
+			t.Errorf("level %d: %d inimigos, want %d", level, got, want)
+		}
+		if got, want := len(l.CoinSpawns), level*2+3; got != want {
+			t.Errorf("level %d: %d moedas, want %d", level, got, want)
+		}
+	}
+}
+
+// TestGenerateSpawnsValidos: inimigos e moedas ficam sobre células sólidas
+// (chão ou plataforma), longe do PlayerStart e sem tocar a coluna do fim;
+// nunca duplicados.
+func TestGenerateSpawnsValidos(t *testing.T) {
+	for _, level := range genLevels {
+		for _, seed := range testSeeds {
+			l, g := genLvl(t, uint64(seed), level)
+
+			seen := map[Tile]bool{}
+			check := func(kind string, spawns []Tile) {
+				for _, s := range spawns {
+					c := g.cellAt(s.X, s.Y)
+					if c != CellChao && c != CellPlataforma {
+						t.Errorf("%s em (%d,%d) célula %v, want chão/plataforma", kind, s.X, s.Y, c)
+					}
+					if s.X < PlayerSpawnX+3 {
+						t.Errorf("%s em x=%d muito perto do spawn (x=%d)", kind, s.X, PlayerSpawnX)
+					}
+					if s.X >= g.w-2 {
+						t.Errorf("%s em x=%d na coluna do fim (w-1=%d)", kind, s.X, g.w-1)
+					}
+					if seen[s] {
+						t.Errorf("%s duplicado em %+v", kind, s)
+					}
+					seen[s] = true
+				}
+			}
+			check("inimigo", l.EnemySpawns)
+			check("moeda", l.CoinSpawns)
+		}
+	}
+}

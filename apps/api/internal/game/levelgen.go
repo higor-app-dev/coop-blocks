@@ -123,6 +123,7 @@ func difficultyParams(level int) (genParams, error) {
 type genGrid struct {
 	w          int
 	h          int
+	level      int      // nível da fase (para escalar inimigos/moedas)
 	cells      [][]Cell // cells[y][x]
 	path       []int    // path[x] = fileira do caminho base na coluna x
 	groundY    int      // fileira do topo do chão
@@ -169,6 +170,7 @@ func generateGrid(seed uint64, level int) (*genGrid, error) {
 	g := &genGrid{
 		w:          w,
 		h:          h,
+		level:      level,
 		cells:      make([][]Cell, h),
 		path:       make([]int, w),
 		groundY:    groundY,
@@ -330,8 +332,11 @@ func (g *genGrid) toLevel(seed uint64) *Level {
 		return tiles[i].Y < tiles[j].Y
 	})
 
-	// Inimigos: sobre o topo do chão, longe do spawn, passo determinístico
-	// (mesmo padrão do GenerateLevel, stream própria da seed).
+	// Inimigos e moedas: quantidades escalam com a fase (inimigos = level+1,
+	// moedas = level*2+3) e posições são determinísticas por seed, escolhidas
+	// entre células de chão ou plataforma perto do caminho principal, com
+	// distância mínima do PlayerStart e sem tocar a coluna do fim. Stream
+	// própria da seed — não altera a ordem de consumo do layout.
 	l := &Level{
 		Spec:         LevelSpec{Width: g.w, Height: g.h, Seed: uint32(seed)},
 		GroundY:      g.groundY,
@@ -342,12 +347,52 @@ func (g *genGrid) toLevel(seed uint64) *Level {
 		PowerUpSpawns: []PowerUpSpawn{},
 		solid:        solid,
 	}
-	rnd := newMulberry32(uint32(seed) ^ 0x5EED)
-	for tx := 12; tx < g.w-1; tx += 5 + int(math.Floor(rnd()*4)) {
-		if g.cells[g.groundY][tx] == CellChao {
-			l.EnemySpawns = append(l.EnemySpawns, Tile{X: tx, Y: g.groundY})
+	spawnRnd := newMulberry32(uint32(seed) ^ 0xA11CE)
+
+	// Candidatos: células sólidas "de pé" (chão ou plataforma) a partir da
+	// coluna PlayerSpawnX+6 até Width-3 (longe do spawn e do fim).
+	var candidates []Tile
+	for y := 0; y < g.h; y++ {
+		for x := PlayerSpawnX + 6; x < g.w-3; x++ {
+			c := g.cells[y][x]
+			if c == CellChao || c == CellPlataforma {
+				candidates = append(candidates, Tile{X: x, Y: y})
+			}
 		}
 	}
+
+	// Embaralha candidatos com a stream da seed (Fisher-Yates) — mesma seed →
+	// mesma ordem → mesmos spawns; seeds diferentes → posições diferentes.
+	for i := len(candidates) - 1; i > 0; i-- {
+		j := int(math.Floor(spawnRnd() * float64(i+1)))
+		candidates[i], candidates[j] = candidates[j], candidates[i]
+	}
+
+	enemyCount := g.level + 1
+	coinCount := g.level*2 + 3
+	if enemyCount > len(candidates) {
+		enemyCount = len(candidates)
+	}
+	if coinCount > len(candidates)-enemyCount {
+		coinCount = len(candidates) - enemyCount
+	}
+
+	l.EnemySpawns = append([]Tile{}, candidates[:enemyCount]...)
+	l.CoinSpawns = append([]Tile{}, candidates[enemyCount:enemyCount+coinCount]...)
+
+	// Saída canônica: spawns ordenados (mesmo padrão do GenerateLevel).
+	sort.Slice(l.EnemySpawns, func(i, j int) bool {
+		if l.EnemySpawns[i].X != l.EnemySpawns[j].X {
+			return l.EnemySpawns[i].X < l.EnemySpawns[j].X
+		}
+		return l.EnemySpawns[i].Y < l.EnemySpawns[j].Y
+	})
+	sort.Slice(l.CoinSpawns, func(i, j int) bool {
+		if l.CoinSpawns[i].X != l.CoinSpawns[j].X {
+			return l.CoinSpawns[i].X < l.CoinSpawns[j].X
+		}
+		return l.CoinSpawns[i].Y < l.CoinSpawns[j].Y
+	})
 	return l
 }
 

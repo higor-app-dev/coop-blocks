@@ -335,6 +335,118 @@ func TestCoinReset(t *testing.T) {
 	}
 }
 
+func TestCoinSpawnDropPosicionaCentrado(t *testing.T) {
+	// Drop espelha o client (dropCoins em main.ts): linha horizontal
+	// centrada no ponto de morte, moedas a CoinDropPitch px umas das outras e
+	// CoinDropLift px acima — determinístico, sem consumo de RNG.
+	m := NewCoinManagerDefault()
+
+	// 1 moeda: centrada no ponto, CoinDropLift acima.
+	c1 := m.SpawnDrop(100, 100, 1)
+	if len(c1) != 1 {
+		t.Fatalf("SpawnDrop(1) = %d moedas, want 1", len(c1))
+	}
+	if c1[0].ID != "c1" || c1[0].X != 100 || c1[0].Y != 100-CoinDropLift {
+		t.Errorf("c1 = %+v, want (100, %v)", c1[0], 100-CoinDropLift)
+	}
+
+	// 3 moedas: centradas ao redor do ponto (offsets -16, 0, +16).
+	drops := m.SpawnDrop(200, 200, 3)
+	if len(drops) != 3 {
+		t.Fatalf("SpawnDrop(3) = %d moedas, want 3", len(drops))
+	}
+	wantX := []float64{200 - CoinDropPitch, 200, 200 + CoinDropPitch}
+	wantY := 200 - CoinDropLift
+	for i, want := range wantX {
+		if drops[i].X != want || drops[i].Y != wantY {
+			t.Errorf("drop[%d] = (%v,%v), want (%v,%v)", i, drops[i].X, drops[i].Y, want, wantY)
+		}
+	}
+	// IDs sequenciais (c2, c3, c4) e hitbox padrão.
+	for i, id := range []string{"c2", "c3", "c4"} {
+		if drops[i].ID != id {
+			t.Errorf("drop[%d].ID = %q, want %q", i, drops[i].ID, id)
+		}
+	}
+	if drops[1].W != CoinDefaultWidth || drops[1].H != CoinDefaultHeight {
+		t.Errorf("hitbox = %vx%v, want %vx%v", drops[1].W, drops[1].H, CoinDefaultWidth, CoinDefaultHeight)
+	}
+	if m.CountCoins() != 4 {
+		t.Errorf("CountCoins = %d, want 4", m.CountCoins())
+	}
+
+	// n <= 0 não cria nada.
+	if got := m.SpawnDrop(300, 300, 0); got != nil {
+		t.Errorf("SpawnDrop(0) = %+v, want nil", got)
+	}
+	if m.CountCoins() != 4 {
+		t.Errorf("CountCoins pós-n=0 = %d, want 4", m.CountCoins())
+	}
+}
+
+func TestCoinDropInimigoDestruidoColetavelEComZeraNaMorte(t *testing.T) {
+	// Aceite: destruir um inimigo cria moedas coletáveis na posição do drop,
+	// que somem ao coletar e seguem o zera-na-morte (ResetPlayer) — mesma
+	// trilha das moedas geradas na fase.
+	lvl := genLevel(t, 120, 12, 7)
+	s := NewEnemySystemDefault(42)
+	s.SpawnForLevel(&lvl)
+	all := s.Enemies()
+	if len(all) == 0 {
+		t.Fatal("fase seed 7 não tem inimigos")
+	}
+	target := all[0]
+
+	// Destruição por tiro: evento com moedas sorteadas da faixa [1,3] e a
+	// posição final do inimigo (top-left da hitbox).
+	evs := s.ApplyDamage(target.ID, 9999, "alice")
+	var drop EnemyEvent
+	for _, ev := range evs {
+		if ev.Type == EnemyEventDestroyed {
+			drop = ev
+			break
+		}
+	}
+	if drop.Coins < EnemyMinCoinDrop || drop.Coins > EnemyMaxCoinDrop {
+		t.Fatalf("drop.Coins = %d, fora da faixa [%d,%d]", drop.Coins, EnemyMinCoinDrop, EnemyMaxCoinDrop)
+	}
+	if drop.X != target.X || drop.Y != target.Y {
+		t.Fatalf("drop pos = (%v,%v), want última pos do inimigo (%v,%v)", drop.X, drop.Y, target.X, target.Y)
+	}
+
+	// O servidor spawna as moedas do drop no CoinManager (SpawnDrop).
+	m := NewCoinManagerDefault()
+	dropped := m.SpawnDrop(drop.X, drop.Y, drop.Coins)
+	if len(dropped) != drop.Coins || m.CountCoins() != drop.Coins {
+		t.Fatalf("SpawnDrop = %d moedas (CountCoins %d), want %d", len(dropped), m.CountCoins(), drop.Coins)
+	}
+	if m.Count("alice") != 0 {
+		t.Fatalf("contador antes da coleta = %d, want 0", m.Count("alice"))
+	}
+
+	// Coleta: o jogador varre a área do drop (como em jogo) — todas as
+	// moedas somem e o contador da fase sobe.
+	collected := 0
+	for px := int(drop.X) - 40; px <= int(drop.X)+40; px += 10 {
+		collected += len(m.Step([]Player{playerTest("alice", px, int(drop.Y), 100)}))
+	}
+	if collected != drop.Coins {
+		t.Fatalf("coletadas = %d, want %d (todas do drop)", collected, drop.Coins)
+	}
+	if m.CountCoins() != 0 {
+		t.Errorf("CountCoins pós-coleta = %d, want 0 (moedas somem)", m.CountCoins())
+	}
+	if m.Count("alice") != drop.Coins {
+		t.Errorf("contador = %d, want %d", m.Count("alice"), drop.Coins)
+	}
+
+	// Morte no mapa atual: zera o contador da fase (regra de reset).
+	m.ResetPlayer("alice")
+	if m.Count("alice") != 0 {
+		t.Errorf("contador pós-morte = %d, want 0", m.Count("alice"))
+	}
+}
+
 func TestCoinsMsgShape(t *testing.T) {
 	coins := []CoinState{{ID: "c2", X: 12, Y: 34, W: 14, H: 14}}
 	removed := []CoinRemoved{{ID: "c1", X: 100, Y: 100}}

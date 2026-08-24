@@ -53,13 +53,15 @@ func main() {
 
 	// Moedas da fase: dono autoritativo do estado (entidades + contador por
 	// jogador DA FASE, separado da carteira persistente em sim). Espalhadas
-	// pelo grid inicial; drops de inimigos usam SpawnAt (mesma trilha de
+	// pelo grid inicial; drops de inimigos usam SpawnDrop (mesma trilha de
 	// coleta/zeramento). Sem pool comum — cada player tem o próprio contador.
 	coins := game.NewCoinManagerDefault()
 	coins.SpawnForLevel(&level)
 
 	// Simulação de HP/moedas/respawn: aplica dano de contato e de projétil
-	// hostil, e credita as moedas dos drops aos atiradores.
+	// hostil. A carteira persistente (Sim.Coins) é o saldo da run que a loja
+	// gasta — os drops de inimigos viram moedas coletáveis na fase (CoinManager),
+	// não crédito direto aqui.
 	sim := game.NewSimDefault(game.NewRandomSource(int64(level.Spec.Seed)))
 
 	// Loja da run: estado de upgrades POR JOGADOR (max_hp, fire_rate, shield)
@@ -291,16 +293,19 @@ func main() {
 					}
 				}
 
-				// 2) Projéteis: amigáveis destróem inimigos (drop de moedas
-				//    para o atirador); hostis ferem jogadores.
+				// 2) Projéteis: amigáveis destróem inimigos — a destruição
+				//    DROPA moedas coletáveis na posição final do inimigo
+				//    (SpawnDrop, mesma trilha das moedas geradas: coleta por
+				//    Step remove + conta, morte zera o contador da fase);
+				//    hostis ferem jogadores. Broadcast imediato para o
+				//    client ver as moedas surgirem no ponto da destruição.
 				for _, h := range projectiles.StepWorld(&lvl, enemies.Enemies(), players) {
 					switch h.Kind {
 					case game.HitEnemy:
 						for _, ev := range enemies.ApplyDamage(h.TargetID, h.Damage, h.OwnerID) {
 							if ev.Type == game.EnemyEventDestroyed {
-								if _, err := sim.AddCoins(ev.PlayerID, ev.Coins); err != nil {
-									log.Printf("coin drop: %v", err)
-								}
+								coins.SpawnDrop(ev.X, ev.Y, ev.Coins)
+								hub.Broadcast(game.CoinsMsg(coins.Snapshot(), nil, coins.Counts()))
 							}
 						}
 					case game.HitPlayer:

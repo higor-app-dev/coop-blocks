@@ -43,6 +43,11 @@ const (
 	// CoinColumnStep: moedas a cada N colunas (client: t.x % 4 === 0).
 	// Usado pelo gerador de fase (level.go) para chão e plataformas.
 	CoinColumnStep = 4
+	// CoinDropPitch: distância horizontal entre moedas consecutivas do drop
+	// de inimigo destruído (client: dropCoins em main.ts, (i-(count-1)/2)*16).
+	CoinDropPitch = 16.0
+	// CoinDropLift: elevação do drop acima do ponto de morte (client: y-6).
+	CoinDropLift = 6.0
 )
 
 // Coin é uma moeda da fase: hitbox AABB em pixels (X/Y = canto superior
@@ -157,6 +162,28 @@ func (m *CoinManager) spawnLocked(x, y float64) *Coin {
 	}
 	m.coins[c.ID] = c
 	return c
+}
+
+// SpawnDrop cria n moedas coletáveis ao redor do ponto (x, y) — o drop de um
+// inimigo destruído (posição final do inimigo, top-left da hitbox). Usa a
+// MESMA trilha das moedas geradas na fase: Step remove ao coletar e
+// incrementa o contador por jogador; ResetPlayer zera o contador da fase na
+// morte. O espalhamento é determinístico (sem RNG) e espelha o client
+// (dropCoins em main.ts): linha horizontal centrada no ponto, moedas a
+// CoinDropPitch px umas das outras e CoinDropLift px acima. n <= 0 não cria
+// nada. Devolve as moedas criadas na ordem do spawn (esquerda → direita).
+func (m *CoinManager) SpawnDrop(x, y float64, n int) []Coin {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n <= 0 {
+		return nil
+	}
+	out := make([]Coin, 0, n)
+	for i := 0; i < n; i++ {
+		off := (float64(i) - float64(n-1)/2) * CoinDropPitch
+		out = append(out, *m.spawnLocked(x+off, y-CoinDropLift))
+	}
+	return out
 }
 
 // SpawnForLevel registra as moedas da fase no gerenciador: uma moeda por

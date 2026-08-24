@@ -16,9 +16,11 @@
 //
 // O sistema de projéteis de jogadores destrói inimigos (ApplyDamage) e o
 // contato com o jogador causa dano (evento EnemyEventPlayerHit). A destruição
-// gera moedas (drop) creditadas a quem deu o tiro final (evento
-// EnemyEventDestroyed). O tiro do atirador é encaminhado ao sistema de
-// projéteis via hook OnShoot (no servidor: ProjectileSystem.FireEnemyShot).
+// devolve o evento EnemyEventDestroyed com a quantidade de moedas e a posição
+// final do inimigo — o servidor spawna moedas coletáveis nessa posição
+// (CoinManager.SpawnDrop, mesma trilha de coleta/zeramento das moedas
+// geradas). O tiro do atirador é encaminhado ao sistema de projéteis via hook
+// OnShoot (no servidor: ProjectileSystem.FireEnemyShot).
 package game
 
 import (
@@ -218,7 +220,8 @@ const (
 )
 
 // EnemyEvent é um fato ocorrido na simulação de inimigos, emitido para o
-// servidor aplicar as consequências (dano ao jogador, moedas ao atirador).
+// servidor aplicar as consequências (dano ao jogador, drop de moedas na
+// posição da destruição).
 type EnemyEvent struct {
 	Type     EnemyEventType
 	EnemyID  string

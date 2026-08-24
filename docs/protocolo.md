@@ -86,15 +86,33 @@ e `apps/api/internal/game/room.go`.
 ```go
 // apps/api/internal/game/room.go
 type PlayerState struct {
-    X  int `json:"x"`   // posição x em pixels (mundo)
-    Y  int `json:"y"`   // posição y em pixels (mundo)
-    HP int `json:"hp"`  // pontos de vida (0–100)
+    X        int     `json:"x"`        // posição x em pixels (mundo)
+    Y        int     `json:"y"`        // posição y em pixels (mundo)
+    VX       float64 `json:"vx"`       // velocidade horizontal (px/s)
+    VY       float64 `json:"vy"`       // velocidade vertical (px/s)
+    HP       int     `json:"hp"`       // pontos de vida (0–100)
+    Grounded bool    `json:"grounded"` // está no chão
+    Facing   int     `json:"facing"`   // 1 = direita, -1 = esquerda
+}
+
+// apps/api/internal/game/projectile.go — estado sincronizado de um projétil
+// (o servidor é dono do estado; o client apenas renderiza):
+type ProjectileState struct {
+    ID      string  `json:"id"`    // id do projétil (sequencial por servidor)
+    Owner   string  `json:"owner"` // id do jogador que atirou
+    X       int     `json:"x"`     // posição x em pixels (top-left da hitbox)
+    Y       int     `json:"y"`     // posição y em pixels
+    VX      float64 `json:"vx"`    // velocidade horizontal (px/s)
+    VY      float64 `json:"vy"`    // velocidade vertical (px/s)
 }
 ```
 
 - Coordenadas em **pixels do mundo do jogo** (tile = 48 px; spawn inicial `X=96` = 2 tiles, `Y=480`).
 - `HP` começa em `100`. Dano (inimigos de contato, −10 HP) é calculado no cliente e chega ao
   servidor apenas como valor refletido no próximo `state`.
+- **Projéteis são autoritativos do servidor**: o client envia apenas a intenção de tiro
+  (`shoot`); posição/velocidade/dono são simulados no servidor e broadcastados no campo
+  `projectiles` da mensagem `players`.
 
 ## 3. Protocolo de mensagens
 
@@ -112,10 +130,11 @@ Toda mensagem é um **frame de texto JSON** cujo objeto contém ao menos o campo
 | Tipo | Direção | Quando | Campos |
 |------|---------|--------|--------|
 | `welcome` | servidor → cliente | na entrada de um jogador na sala (broadcast para **todos**) | `id`, `players` |
-| `players` | servidor → cliente | broadcast periódico (~10 Hz) | `players` |
+| `players` | servidor → cliente | broadcast periódico (~10 Hz) | `players`, `projectiles` |
 | `player_leave` | servidor → cliente | quando um jogador desconecta | `id` |
 | `player_join` | servidor → cliente | **não enviado pelo servidor** (ver nota) | `player` |
-| `state` | cliente → servidor | envio contínuo do estado local (~10×/s) | `x`, `y`, `hp` |
+| `state` | cliente → servidor | envio contínuo do estado local (~10×/s) | `x`, `y`, `hp`, `facing` |
+| `shoot` | cliente → servidor | intenção de tiro (borda de pressão) | — |
 
 ### 3.3 Servidor → Cliente
 
@@ -151,6 +170,9 @@ Broadcast periódico do estado de todos os jogadores (~10 Hz, ticker de 100 ms n
   "players": [
     {"x": 96, "y": 480, "hp": 100},
     {"x": 412, "y": 372, "hp": 80}
+  ],
+  "projectiles": [
+    {"id": "p7", "owner": "a3f9c2d4e5b67890", "x": 612, "y": 430, "vx": 560, "vy": 0}
   ]
 }
 ```
@@ -159,6 +181,14 @@ Broadcast periódico do estado de todos os jogadores (~10 Hz, ticker de 100 ms n
 > o client atual usa a ordem/posição relativa e seu próprio `id` para auto-exclusão. Se precisar
 > rastrear jogadores individuais de forma confiável, trate a lista como um snapshot substituível
 > (substitua a lista inteira a cada `players`).
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `players` | array | snapshot atual da sala: objetos `PlayerState` (`x`, `y`, `vx`, `vy`, `hp`, `grounded`, `facing`) **sem** `id` |
+| `projectiles` | array | projéteis em voo: objetos `ProjectileState` (`id`, `owner`, `x`, `y`, `vx`, `vy`). Vazio quando não há tiros. **Autoritativo do servidor** — o client não envia posição de projétil. |
+
+> O projétil some do `projectiles` quando colide (parede/chão/inimigo/borda do mundo) ou
+> expira por tempo de vida. O client deve remover projéteis que deixarem de aparecer.
 
 #### `player_leave`
 
@@ -182,12 +212,12 @@ broadcast). Fica registrado como intenção/evolução futura; não depende dele
 
 #### `state`
 
-O único tipo aceito pelo servidor na leitura. O cliente o envia continuamente (no client
-atual, a cada frame via `onUpdate`, na prática ~10×/s). O servidor grava `x`, `y`, `hp` no
-registro do jogador na sala; o próximo broadcast `players` reflete o novo estado.
+Enviado continuamente pelo cliente (no client atual, a cada frame via `onUpdate`, na
+prática ~10×/s). O servidor grava `x`, `y`, `hp` no registro do jogador na sala (e `facing`
+quando presente); o próximo broadcast `players` reflete o novo estado.
 
 ```json
-{"type": "state", "x": 412, "y": 372, "hp": 80}
+{"type": "state", "x": 412, "y": 372, "hp": 80, "facing": 1}
 ```
 
 | Campo | Tipo | Obrigatório | Descrição |
@@ -196,9 +226,27 @@ registro do jogador na sala; o próximo broadcast `players` reflete o novo estad
 | `x` | int | sim | posição x em pixels |
 | `y` | int | sim | posição y em pixels |
 | `hp` | int | sim | vida atual (0–100) |
+| `facing` | int | não | direção do jogador (1 = direita, -1 = esquerda). O servidor só atualiza quando o valor é ≠ 0 |
 
-Mensagens recebidas com JSON inválido ou com `type` diferente de `"state"` são **ignoradas**
-silenciosamente pelo servidor (`continue` no loop de leitura).
+#### `shoot`
+
+Intenção de tiro (borda de pressão — o client envia uma vez por aperto do botão de tiro).
+O servidor **cria o projétil** de forma autoritativa na posição atual do jogador, na direção
+do `facing` gravado; o client não envia posição/velocidade do projétil.
+
+```json
+{"type": "shoot"}
+```
+
+| Campo | Tipo | Obrigatório | Descrição |
+|-------|------|-------------|-----------|
+| `type` | string | sim | deve ser exatamente `"shoot"` |
+
+> O servidor não limita a cadência de tiro hoje (um `shoot` = um projétil). Limite de
+> rate/fire é item futuro.
+
+Mensagens recebidas com JSON inválido ou com `type` diferente de `"state"`/`"shoot"` são
+**ignoradas** silenciosamente pelo servidor (`continue` no loop de leitura).
 
 ## 4. Fluxos importantes
 
@@ -223,15 +271,19 @@ remotos), e começar a enviar `state`. Não há handshake de autenticação nem 
 
 ### 4.2 Atualização de estado (ação/movimento)
 
-Não existe mensagem de "ação" (pular, atirar, andar) no protocolo. **Toda ação é simulada
-localmente** no cliente e o resultado (nova posição/HP) é propagado como `state`:
+Movimento continua **simulado localmente** no cliente e propagado como `state`
+(a migração completa para física autoritativa do player está em andamento — `player.go`
+existe no servidor mas o wiring no tick loop é de outra tarefa). O **tiro já é autoritativo**:
 
 ```
-Cliente (simula movimento/pulo/dano) → state {x,y,hp} → Servidor grava → broadcast players → demais clientes renderizam
+Cliente (aperta tiro) → shoot → Servidor cria projétil (posição/direção do facing gravado)
+                        → simula voo a cada tick (20 tps) → colisão (parede/chão/inimigo/
+                          borda) ou expiração remove o projétil
+                        → broadcast players.projectiles → todos renderizam
 ```
 
-Consequência prática: o servidor não valida velocidade, física nem posição — é um relay do
-que cada cliente reporta.
+Consequência prática: o servidor valida a trajetória do projétil contra o grid da fase e
+reporta colisões pelo hook `OnHit` (dano ainda não aplicado — camada de HP é outra tarefa).
 
 ### 4.3 Saída de jogador
 
@@ -350,10 +402,12 @@ das regras do jogo.
 
 | Arquivo | Conteúdo |
 |---------|----------|
-| `apps/api/internal/game/messages.go` | construtores de `welcome`, `player_leave`, `players` |
-| `apps/api/internal/game/room.go` | `PlayerState` (x, y, hp), sala, spawn inicial |
-| `apps/api/internal/ws/hub.go` | upgrade WS, loop de leitura (aceita `state`), broadcast, ping 30 s |
+| `apps/api/internal/game/messages.go` | construtores de `welcome`, `player_leave`, `players`, `WorldMsg` (players + projectiles) |
+| `apps/api/internal/game/room.go` | `PlayerState` (x, y, vx, vy, hp, grounded, facing), sala, spawn inicial |
+| `apps/api/internal/game/projectile.go` | `ProjectileSystem` autoritativo (Fire/Step/Snapshot), hook `OnHit`, tipos `ProjectileState`/`ProjectileHit`/`Enemy` |
+| `apps/api/internal/game/player.go` | física do player no servidor (`PlayerBody` — wiring no loop é outra tarefa) |
+| `apps/api/internal/ws/hub.go` | upgrade WS, loop de leitura (aceita `state` e `shoot`), broadcast, ping 30 s |
 | `apps/api/internal/ws/id.go` | geração de id hex (16 chars) |
-| `apps/api/cmd/server/main.go` | wiring hub↔sala, ticker 100 ms (~10 Hz), rotas `/api/health` e `/api/ws` |
+| `apps/api/cmd/server/main.go` | wiring hub↔sala↔projéteis, loop de simulação 20 tps (50 ms) com broadcast ~10 Hz, rotas `/api/health` e `/api/ws` |
 | `apps/web/src/net.ts` | client de referência (envia `state`, consome `welcome`/`players`/`player_leave`) |
 | `apps/web/src/levelgen.ts` | geração procedural de fase (`mulberry32`, seed local) |

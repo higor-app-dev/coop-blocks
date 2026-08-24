@@ -18,10 +18,22 @@ func LeaveMsg(id string) map[string]any {
 	}
 }
 
-// PlayersMsg é o broadcast periódico do estado da sala.
+// PlayersMsg é o broadcast periódico do estado da sala (compatível com o
+// client atual; projectiles ausente → lista vazia no client antigo).
 func PlayersMsg(players []PlayerState) map[string]any {
 	return map[string]any{
 		"type":    "players",
 		"players": players,
+	}
+}
+
+// WorldMsg é o broadcast periódico do estado completo do mundo: jogadores +
+// projéteis em voo. Mantém o type "players" para compatibilidade com o client
+// atual — o campo projectiles é extra e ignorado por clients que não o leem.
+func WorldMsg(players []PlayerState, projectiles []ProjectileState) map[string]any {
+	return map[string]any{
+		"type":        "players",
+		"players":     players,
+		"projectiles": projectiles,
 	}
 }

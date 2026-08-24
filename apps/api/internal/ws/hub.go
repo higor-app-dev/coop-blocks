@@ -40,6 +40,7 @@ type Hub struct {
 	clients  map[*Client]bool
 	onJoin   func(c *Client)
 	onState  func(c *Client, st game.PlayerState)
+	onShoot  func(c *Client)
 	onLeave  func(c *Client)
 }
 
@@ -51,6 +52,7 @@ func NewHub() *Hub {
 
 func (h *Hub) OnJoin(fn func(c *Client))  { h.onJoin = fn }
 func (h *Hub) OnState(fn func(c *Client, st game.PlayerState)) { h.onState = fn }
+func (h *Hub) OnShoot(fn func(c *Client)) { h.onShoot = fn }
 func (h *Hub) OnLeave(fn func(c *Client)) { h.onLeave = fn }
 
 // Broadcast envia uma mensagem JSON para todas as conexões.
@@ -114,16 +116,25 @@ func (h *Hub) readLoop(c *Client) {
 			return
 		}
 		var msg struct {
-			Type string `json:"type"`
-			X    int    `json:"x"`
-			Y    int    `json:"y"`
-			HP   int    `json:"hp"`
+			Type   string `json:"type"`
+			X      int    `json:"x"`
+			Y      int    `json:"y"`
+			HP     int    `json:"hp"`
+			Facing int    `json:"facing"`
 		}
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
 		}
-		if msg.Type == "state" && h.onState != nil {
-			h.onState(c, game.PlayerState{X: msg.X, Y: msg.Y, HP: msg.HP})
+		switch msg.Type {
+		case "state":
+			if h.onState != nil {
+				h.onState(c, game.PlayerState{X: msg.X, Y: msg.Y, HP: msg.HP, Facing: msg.Facing})
+			}
+		case "shoot":
+			// intenção de tiro — o servidor cria o projétil (autoritativo).
+			if h.onShoot != nil {
+				h.onShoot(c)
+			}
 		}
 	}
 }

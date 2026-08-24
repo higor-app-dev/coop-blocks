@@ -41,6 +41,51 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+// ===== Status da conexão =====
+
+describe("connectToServer — status da conexão", () => {
+  it("emite connecting no início e open quando o socket abre", () => {
+    const statuses: string[] = [];
+    connectToServer(makeK() as any, {
+      ...makeOpts("/api/ws"),
+      onStatus: (s) => statuses.push(s),
+    });
+    expect(statuses).toEqual(["connecting"]);
+    FakeWebSocket.instances[0].onopen?.();
+    expect(statuses).toEqual(["connecting", "open"]);
+  });
+
+  it("emite reconnecting quando a conexão cai após já ter aberto", () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    connectToServer(makeK() as any, {
+      ...makeOpts("/api/ws"),
+      onStatus: (s) => statuses.push(s),
+    });
+    const ws0 = FakeWebSocket.instances[0];
+    ws0.onopen?.();
+    ws0.onclose?.();
+    expect(statuses).toEqual(["connecting", "open", "reconnecting"]);
+    vi.advanceTimersByTime(2000);
+    expect(FakeWebSocket.instances.length).toBe(2); // reconectou
+  });
+
+  it("disconnect emite closed e interrompe o loop de reconexão", () => {
+    vi.useFakeTimers();
+    const statuses: string[] = [];
+    const net = connectToServer(makeK() as any, {
+      ...makeOpts("/api/ws"),
+      onStatus: (s) => statuses.push(s),
+    });
+    FakeWebSocket.instances[0].onopen?.();
+    net.disconnect();
+    expect(statuses).toEqual(["connecting", "open", "closed"]);
+    vi.advanceTimersByTime(10_000);
+    expect(FakeWebSocket.instances.length).toBe(1); // não reconectou
+  });
 });
 
 // ===== Resolução de URL =====

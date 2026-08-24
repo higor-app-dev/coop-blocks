@@ -139,12 +139,16 @@ export interface NetPowerUpUpdate {
   effects: NetPowerUpEffects;
 }
 
+export type NetStatus = "connecting" | "open" | "reconnecting" | "closed";
+
 export interface NetOpts {
   url: string;
   player: GameObj<any>;
   onPlayers: (list: NetPlayer[]) => void;
   onPlayerJoin: (np: NetPlayer) => void;
   onPlayerLeave: (id: string) => void;
+  /** Estado da conexão WebSocket — o client exibe um indicador visível. */
+  onStatus?: (status: NetStatus) => void;
   /** Broadcast de fase: abre a loja (shop), atualiza prontos ou inicia o próximo mapa (playing). */
   onPhase?: (state: NetPhaseState) => void;
   /** Atualização de moedas (estado + remoções + contadores por jogador). */
@@ -173,8 +177,12 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
   let ws: WebSocket | null = null;
   let myId = "";
   let connected = false;
+  let everOpened = false;
+  let stopped = false;
 
   function connect() {
+    if (stopped) return;
+    opts.onStatus?.(everOpened ? "reconnecting" : "connecting");
     const proto = location.protocol === "https:" ? "wss" : "ws";
     // URL absoluta (http/https/ws/wss — ex.: VITE_API_URL apontando para o
     // backend real em outro host) é usada direto, convertendo http(s) → ws(s)
@@ -187,8 +195,15 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
     ws = new WebSocket(target);
 
     ws.onopen = () => {
+      if (stopped) return;
       connected = true;
+      everOpened = true;
+      opts.onStatus?.("open");
       sendState();
+    };
+
+    ws.onerror = () => {
+      // O onclose sempre segue um erro; a UI é atualizada lá (reconnecting).
     };
 
     ws.onmessage = (ev) => {
@@ -276,7 +291,9 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
     };
 
     ws.onclose = () => {
+      if (stopped) return;
       connected = false;
+      if (everOpened) opts.onStatus?.("reconnecting");
       setTimeout(connect, 2000);
     };
   }
@@ -306,6 +323,17 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
   return {
     myId: () => myId,
     sendState,
+    /** Interrompe a conexão e o loop de reconexão; emite status "closed". */
+    disconnect: () => {
+      stopped = true;
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+      connected = false;
+      opts.onStatus?.("closed");
+    },
     /** Intenção de compra na loja — o servidor valida e responde shop_buy_result. */
     sendShopBuy: (upgrade: string) => send({ type: "shop_buy", upgrade }),
     /** Confirmação de 'pronto' na loja — o servidor broadcasta o novo estado de fase. */

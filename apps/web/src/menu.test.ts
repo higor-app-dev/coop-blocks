@@ -91,13 +91,18 @@ describe("createMenu", () => {
     expect(findByClass("menu-btn-multiplayer")).toBeTruthy();
   });
 
-  it("começa visível e hide()/show() alternam a visibilidade", () => {
+  it("começa visível e hide()/show() alternam a visibilidade (hidden + display)", () => {
     const menu = createMenu({ root: doc.doc.body, onSelect: vi.fn() });
     expect(menu.el.hidden).toBe(false);
+    // ⚠️ regression: o menu tem display:flex inline no cssText — o atributo
+    // hidden NÃO vence CSS inline; hide() precisa setar display:none senão o
+    // overlay continua na tela (o jogo roda atrás e parece que nada acontece).
     menu.hide();
     expect(menu.el.hidden).toBe(true);
+    expect(menu.el.style.display).toBe("none");
     menu.show();
     expect(menu.el.hidden).toBe(false);
+    expect(menu.el.style.display).toBe("");
   });
 
   it("clique em 'Jogar Solo' chama onSelect('solo')", () => {

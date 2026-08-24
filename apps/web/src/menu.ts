@@ -109,9 +109,14 @@ export function createMenu(opts: MenuOpts): MenuHandle {
     el,
     show: () => {
       el.hidden = false;
+      // ⚠️ hidden NÃO vence `display:flex` inline (cssText acima) — precisa
+      // limpar o display também, senão o overlay continua visível e parece
+      // que "nada acontece" ao escolher (o jogo roda atrás do menu).
+      el.style.display = "";
     },
     hide: () => {
       el.hidden = true;
+      el.style.display = "none";
     },
     select: (choice: MenuChoice) => opts.onSelect(choice),
   };

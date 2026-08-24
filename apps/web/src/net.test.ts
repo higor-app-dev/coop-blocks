@@ -213,3 +213,68 @@ describe("connectToServer — envio de intenções da loja", () => {
     expect(sent).toEqual([]);
   });
 });
+
+// ===== Boss (WorldMsg) =====
+
+describe("connectToServer — boss (WorldMsg)", () => {
+  it("WorldMsg com boss entrega o estado completo (posição/HP/estado/fase)", () => {
+    const onBoss = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onBoss });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "players",
+        players: [],
+        boss: { id: "boss", x: 5472, y: 288, hp: 380, maxHp: 400, state: "investida", phase: 5 },
+      }),
+    });
+    expect(onBoss).toHaveBeenCalledWith({
+      id: "boss",
+      x: 5472,
+      y: 288,
+      hp: 380,
+      maxHp: 400,
+      state: "investida",
+      phase: 5,
+    });
+  });
+
+  it("WorldMsg com boss null (fase fora da régua de 5) entrega null — client esconde", () => {
+    const onBoss = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onBoss });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "players", players: [], boss: null }),
+    });
+    expect(onBoss).toHaveBeenCalledWith(null);
+  });
+
+  it("WorldMsg sem o campo boss (servidor antigo) não dispara onBoss", () => {
+    const onBoss = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onBoss });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "players", players: [{ id: "alice", x: 1, y: 2, hp: 100 }] }),
+    });
+    expect(onBoss).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Tiro do jogador (shoot) =====
+
+describe("connectToServer — envio de tiro (shoot)", () => {
+  it("sendShoot envia {type:shoot} sem payload", () => {
+    const sent: string[] = [];
+    const server = connectToServer(makeK() as any, makeOpts("/api/ws"));
+    captureWs(sent).onopen?.();
+    sent.length = 0; // descarta o state do onopen
+    server.sendShoot();
+    expect(JSON.parse(sent[0])).toEqual({ type: "shoot" });
+  });
+
+  it("não envia nada com a conexão fechada", () => {
+    const sent: string[] = [];
+    const server = connectToServer(makeK() as any, makeOpts("/api/ws"));
+    const ws = captureWs(sent);
+    ws.readyState = 0; // CONNECTING — send() deve ignorar
+    server.sendShoot();
+    expect(sent).toEqual([]);
+  });
+});

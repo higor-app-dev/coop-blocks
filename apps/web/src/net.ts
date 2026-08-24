@@ -11,6 +11,22 @@ export interface NetPlayer {
   hp: number;
 }
 
+/**
+ * Boss ativo da fase no broadcast WorldMsg (campo `boss` — fases múltiplas de
+ * 5). Posição (x/y) é o canto superior esquerdo da hitbox em px; state é o
+ * nome da máquina de estados ("idle" | "investida" | "salto"); o campo vem
+ * null (ou ausente) quando não há boss — o client esconde a renderização.
+ */
+export interface NetBoss {
+  id: string;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  state: string;
+  phase: number;
+}
+
 /** Estatísticas efetivas de um jogador (upgrades aplicados) no broadcast de fase. */
 export interface NetShopStats {
   maxHp: number;
@@ -54,6 +70,12 @@ export interface NetOpts {
   onShopBuyResult?: (rc: NetBuyReceipt | { ok: false; error: string }) => void;
   /** Erro individual de shop_ready (fora da loja, jogador desconhecido). */
   onShopReadyError?: (error: string) => void;
+  /**
+   * Boss da fase: estado completo (posição/HP/estado/fase) a cada broadcast
+   * WorldMsg; null quando o servidor anuncia que não há boss (fase fora da
+   * régua de 5 ou derrota) — o client esconde a renderização e a barra.
+   */
+  onBoss?: (state: NetBoss | null) => void;
 }
 
 export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
@@ -92,6 +114,13 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
           opts.onPlayerLeave(msg.id);
         } else if (msg.type === "players") {
           opts.onPlayers(msg.players ?? []);
+          // WorldMsg: o campo `boss` carrega o estado do boss da fase (fases
+          // múltiplas de 5) — null sem boss (o client esconde). Só dispara
+          // quando o servidor envia o campo (compatibilidade com versões
+          // antigas que broadcastam apenas players).
+          if ("boss" in msg) {
+            opts.onBoss?.(msg.boss ?? null);
+          }
         } else if (msg.type === "phase") {
           opts.onPhase?.({
             phase: msg.phase === "shop" ? "shop" : "playing",
@@ -154,5 +183,11 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
     sendShopBuy: (upgrade: string) => send({ type: "shop_buy", upgrade }),
     /** Confirmação de 'pronto' na loja — o servidor broadcasta o novo estado de fase. */
     sendShopReady: () => send({ type: "shop_ready" }),
+    /**
+     * Intenção de tiro do jogador local: o servidor valida o cooldown
+     * (fire_rate da loja) e cria o projétil AUTORITATIVO — é ele que causa
+     * dano a inimigos e ao boss (HitBoss); o client só renderiza o estado.
+     */
+    sendShoot: () => send({ type: "shoot" }),
   };
 }

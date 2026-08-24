@@ -33,6 +33,7 @@ import {
   setMuted,
   startMusic,
 } from "./audio";
+import { createBossLayer } from "./boss";
 
 // ===== Configuração do jogo =====
 // Canvas dentro do container #app (100% da viewport). letterbox mantém a
@@ -144,6 +145,17 @@ let localDead = false;
 // contagem regressiva do respawn no painel do HUD. Zerado ao voltar à vida.
 let localDeadSince = 0;
 
+// ===== Boss (multiplayer — servidor autoritativo) =====
+// O boss só existe em fases múltiplas de 5 e é 100% do servidor: a camada
+// renderiza o bloco gigante na posição/estado/HP broadcastados (WorldMsg
+// `boss` — null sem boss, o client esconde) e expõe hp()/maxHp()/state()
+// para a barra do HUD (card filho t_b08df194). Sem simulação local e sem
+// colisão (bloco permissivo: players passam por cima/por baixo — o risco
+// vem dos ataques do servidor). O buildWorld limpa a camada na troca de fase.
+const bossLayer = createBossLayer(k);
+// DEBUG — expõe a camada para o smoke test e2e (mesmo padrão das moedas).
+(window as unknown as Record<string, unknown>).__dbgBoss = bossLayer;
+
 // ===== Inicialização do áudio no primeiro gesto =====
 // A política de autoplay dos browsers deixa o AudioContext suspenso até um
 // gesto do usuário. Amarramos a criação/retomada ao primeiro pointerdown ou
@@ -249,6 +261,9 @@ function buildWorld(number: number, maxHp: number): void {
   player.paused = false;
   playerMaxHp = maxHp;
   localDead = false;
+  // O mundo novo não tem boss até o servidor broadcastar (SpawnForLevel nas
+  // fases múltiplas de 5) — a camada nasce vazia a cada reconstrução.
+  bossLayer.clear();
 }
 
 // ===== Jogador local =====
@@ -472,6 +487,9 @@ const server = connectToServer(k, {
   },
   // Erro de pronto (ex.: fora da loja) — mostra na tela e deixa tentar de novo.
   onShopReadyError: (err) => shop.showError(err),
+  // Boss da fase (fases múltiplas de 5): espelha posição/estado/HP do
+  // servidor — o bloco aparece/some conforme o broadcast (null esconde).
+  onBoss: (state) => bossLayer.apply(state),
 });
 
 // ===== Controles (input adaptativo: teclado + touch) =====
@@ -623,6 +641,10 @@ onUpdate(() => {
         player.pos.y - 10
       );
       player.shoot();
+      // Servidor autoritativo: ele valida o cooldown (fire_rate) e cria o
+      // projétil que causa dano a inimigos e ao boss (HitBoss) — o client
+      // só envia a intenção e renderiza o estado broadcastado.
+      server.sendShoot();
     }
   }
 

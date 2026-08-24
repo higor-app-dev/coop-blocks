@@ -101,3 +101,58 @@ func ShieldAbsorbedMsg(playerID string) map[string]any {
 		"id":   playerID,
 	}
 }
+
+// PlayerRunState é o estado individual de um jogador no broadcast de fase:
+// saldo de moedas INDIVIDUAL (carteira da run) e estatísticas efetivas com os
+// upgrades comprados aplicados (RunStats).
+type PlayerRunState struct {
+	ID    string   `json:"id"`
+	Coins int      `json:"coins"`
+	Stats RunStats `json:"stats"`
+}
+
+// PhaseMsg é o broadcast de mudança de fase da run. Cobre os três momentos:
+//
+//   - abertura da loja (phase="shop"): o client renderiza a tela de loja com o
+//     saldo de cada jogador, o catálogo e o estado de prontos;
+//   - cada confirmação de 'pronto' (phase="shop"): todos os clientes veem quem
+//     já confirmou (ready atualizado);
+//   - início do próximo mapa (phase="playing"): o client navega para a fase
+//     seguinte sabendo os upgrades e saldos atualizados de cada jogador.
+//
+// players carrega SEMPRE o estado individual (upgrades + saldo); ready só tem
+// conteúdo na loja (vazio fora dela).
+func PhaseMsg(phase RunPhase, number int, ready map[string]bool, players []PlayerRunState) map[string]any {
+	if ready == nil {
+		ready = map[string]bool{}
+	}
+	if players == nil {
+		players = []PlayerRunState{}
+	}
+	return map[string]any{
+		"type":    "phase",
+		"phase":   runPhaseName(phase),
+		"number":  number,
+		"ready":   ready,
+		"players": players,
+	}
+}
+
+// runPhaseName serializa a fase da run para o wire format.
+func runPhaseName(p RunPhase) string {
+	if p == PhaseShop {
+		return "shop"
+	}
+	return "playing"
+}
+
+// ShopReadyErrorMsg é a resposta INDIVIDUAL de erro de shop_ready (ex.: fora
+// da fase de loja, jogador desconhecido). Sucesso não tem resposta própria — o
+// broadcast phase com o estado de prontos atualizado é a confirmação.
+func ShopReadyErrorMsg(errMsg string) map[string]any {
+	return map[string]any{
+		"type":  "shop_ready_result",
+		"ok":    false,
+		"error": errMsg,
+	}
+}

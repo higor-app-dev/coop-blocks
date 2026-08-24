@@ -123,10 +123,11 @@ type RunUpgrades struct {
 }
 
 // RunStats são as estatísticas efetivas do jogador após aplicar os upgrades.
+// As tags JSON são o wire format consumido pelos broadcasts de fase e loja.
 type RunStats struct {
-	MaxHP              int     // teto de vida (base DefaultMaxHP + bônus)
-	FireRateMultiplier float64 // multiplicador de cadência (1.0 = base)
-	ShieldCharges      int     // cargas de escudo restantes
+	MaxHP              int     `json:"maxHp"`    // teto de vida (base DefaultMaxHP + bônus)
+	FireRateMultiplier float64 `json:"fireRate"` // multiplicador de cadência (1.0 = base)
+	ShieldCharges      int     `json:"shield"`   // cargas de escudo restantes
 }
 
 // Receipt é o comprovante de uma compra: o que foi comprado, quanto custou,

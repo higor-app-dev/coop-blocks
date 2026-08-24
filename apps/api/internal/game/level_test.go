@@ -285,3 +285,29 @@ func TestLevelSpawnLongeDeLacuna(t *testing.T) {
 		}
 	}
 }
+
+// TestLevelFinished define a fronteira de fim de fase: a fase está completa
+// quando a BORDA DIREITA do hitbox do jogador cruza a primeira coluna do fim
+// (Width-1) — espelho da meta de atravessabilidade do gerador (coluna final).
+// No spawn (x=96) a fase nunca está completa; na borda exata vira true.
+func TestLevelFinished(t *testing.T) {
+	l := genLevel(t, 120, 12, 1)
+	finishX := float64((l.Spec.Width - 1) * TileSize) // pixel da 1ª coluna do fim
+	tests := []struct {
+		name string
+		px   float64
+		want bool
+	}{
+		{name: "spawn longe do fim", px: 96, want: false},
+		{name: "meio do mapa", px: finishX / 2, want: false},
+		{name: "borda direita na coluna final", px: finishX - PlayerWidth, want: true},
+		{name: "passou do fim", px: finishX + 100, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := l.Finished(tt.px); got != tt.want {
+				t.Errorf("Finished(%v) = %v, want %v", tt.px, got, tt.want)
+			}
+		})
+	}
+}

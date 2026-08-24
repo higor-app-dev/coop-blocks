@@ -140,3 +140,40 @@ func TestHubSendToEntregaApenasAoDestinatario(t *testing.T) {
 	}
 	_ = clientB
 }
+
+func TestHubShopReadyRoteiaParaCallback(t *testing.T) {
+	h := NewHub()
+	h.OnJoin(func(c *Client) {
+		h.Broadcast(map[string]any{"type": "welcome", "id": c.ID()})
+	})
+	got := make(chan string, 1)
+	h.OnShopReady(func(c *Client) {
+		got <- c.ID()
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(h.ServeWS))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("welcome: %v", err)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": "shop_ready"}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case id := <-got:
+		if id == "" {
+			t.Error("shop_ready chegou ao callback com ID vazio")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: shop_ready não chegou ao callback")
+	}
+}

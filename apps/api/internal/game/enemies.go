@@ -328,6 +328,20 @@ func (s *EnemySystem) availableTypesLocked() []EnemyType {
 	return pool
 }
 
+// Reset limpa o campo para o início de uma nova fase: remove todos os
+// inimigos e a invulnerabilidade pós-contato, e re-semeia o RNG com a seed da
+// nova fase (determinismo por fase: a mesma fase gera o mesmo elenco e o mesmo
+// comportamento para todos os jogadores). Mantém o hook OnShoot e a fase atual
+// (SetPhase controla o pool de tipos do próximo SpawnForLevel).
+func (s *EnemySystem) Reset(seed uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rng = newMulberry32(seed)
+	s.nextID = 0
+	s.enemies = make(map[string]*Enemy)
+	s.contactCd = make(map[string]int)
+}
+
 // SpawnForLevel cria um inimigo em cada EnemySpawns do level (integrado ao
 // levelgen), com tipo sorteado do pool disponível na fase atual. Devolve o
 // número de inimigos criados. A ordem de consumo do RNG é fixa (spawns já

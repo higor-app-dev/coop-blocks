@@ -36,13 +36,14 @@ func (c *Client) SetState(st game.PlayerState) {
 
 // Hub gerencia todas as conexões ativas.
 type Hub struct {
-	mu        sync.RWMutex
-	clients   map[*Client]bool
-	onJoin    func(c *Client)
-	onState   func(c *Client, st game.PlayerState)
-	onShoot   func(c *Client)
-	onShopBuy func(c *Client, upgrade string)
-	onLeave   func(c *Client)
+	mu          sync.RWMutex
+	clients     map[*Client]bool
+	onJoin      func(c *Client)
+	onState     func(c *Client, st game.PlayerState)
+	onShoot     func(c *Client)
+	onShopBuy   func(c *Client, upgrade string)
+	onShopReady func(c *Client)
+	onLeave     func(c *Client)
 }
 
 func NewHub() *Hub {
@@ -58,7 +59,11 @@ func (h *Hub) OnShoot(fn func(c *Client))                      { h.onShoot = fn 
 // OnShopBuy registra o handler de compra na loja: recebe o cliente e o ID do
 // upgrade pedido (string crua — a validação de catálogo é do handler).
 func (h *Hub) OnShopBuy(fn func(c *Client, upgrade string)) { h.onShopBuy = fn }
-func (h *Hub) OnLeave(fn func(c *Client))                   { h.onLeave = fn }
+
+// OnShopReady registra o handler de confirmação de 'pronto' na loja — o
+// servidor marca o jogador pronto e, com todos prontos, avança a fase.
+func (h *Hub) OnShopReady(fn func(c *Client)) { h.onShopReady = fn }
+func (h *Hub) OnLeave(fn func(c *Client))     { h.onLeave = fn }
 
 // Broadcast envia uma mensagem JSON para todas as conexões.
 func (h *Hub) Broadcast(msg map[string]any) {
@@ -160,6 +165,12 @@ func (h *Hub) readLoop(c *Client) {
 			// upgrade, debita a carteira do comprador e responde individual.
 			if h.onShopBuy != nil {
 				h.onShopBuy(c, msg.Upgrade)
+			}
+		case "shop_ready":
+			// confirmação de 'pronto' na loja — o servidor marca o jogador e,
+			// com todos prontos, avança para a próxima fase (broadcast phase).
+			if h.onShopReady != nil {
+				h.onShopReady(c)
 			}
 		}
 	}

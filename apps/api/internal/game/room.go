@@ -133,6 +133,35 @@ func (r *Room) GetPlayer(id string) (*Player, bool) {
 	return p, ok
 }
 
+// GetState devolve uma CÓPIA do estado do jogador. É a leitura segura para
+// handlers fora do lock (OnShoot etc.): o ponteiro interno nunca escapa, então
+// não há corrida com SetState/ResetToSpawn do loop/avanço de fase.
+func (r *Room) GetState(id string) (PlayerState, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.players[id]
+	if !ok {
+		return PlayerState{}, false
+	}
+	return p.PlayerState, true
+}
+
+// SetState atualiza posição/HP/facing de um jogador de forma atômica sob o
+// lock da sala — thread-safe contra o loop de simulação e o avanço de fase
+// (ResetToSpawn). Facing só é gravado quando != 0 (0 = ausente/legado).
+func (r *Room) SetState(id string, st PlayerState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.players[id]
+	if !ok {
+		return
+	}
+	p.X, p.Y, p.HP = st.X, st.Y, st.HP
+	if st.Facing != 0 {
+		p.Facing = st.Facing
+	}
+}
+
 // Players devolve cópias do estado de todos os jogadores COM ID (para a IA de
 // inimigos: seleção determinística de alvo e dano de contato).
 func (r *Room) Players() []Player {
@@ -154,6 +183,23 @@ func (r *Room) Snapshot() []PlayerState {
 		out = append(out, p.PlayerState)
 	}
 	return out
+}
+
+// ResetToSpawn reposiciona TODOS os jogadores no spawn do próximo mapa (x, y
+// em pixels), zera velocidades e facing, e aplica o HP individual do mapa hps
+// (id → HP, ex.: teto com upgrades do Sim — cada jogador revive com o seu).
+// Jogador sem entrada no mapa mantém o HP atual. Usado no avanço de fase.
+func (r *Room) ResetToSpawn(x, y int, hps map[string]int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, p := range r.players {
+		p.X, p.Y = x, y
+		p.VX, p.VY = 0, 0
+		p.Facing = 1
+		if hp, ok := hps[id]; ok {
+			p.HP = hp
+		}
+	}
 }
 
 // Count retorna o número de jogadores na sala.

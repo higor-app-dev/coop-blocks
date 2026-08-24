@@ -251,6 +251,15 @@ func (l *Level) Signature() string {
 	return b.String()
 }
 
+// Finished diz se a fase está completa para um jogador na coordenada x em
+// pixels (canto superior esquerdo do hitbox): a borda direita do hitbox
+// cruzou a primeira coluna do fim (Width-1). Espelha a meta de
+// atravessabilidade do gerador (Level.Traversable: coluna Width-1 no chão) —
+// chegar ao fim do mapa é o que fecha a fase e abre a loja.
+func (l *Level) Finished(px float64) bool {
+	return px+PlayerWidth >= float64((l.Spec.Width-1)*TileSize)
+}
+
 // Traversable reports whether existe caminho válido do spawn do jogador até o
 // fim da fase (coluna Width-1 no chão), sem paredes bloqueando o progresso.
 //

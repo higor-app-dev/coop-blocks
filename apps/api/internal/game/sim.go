@@ -158,6 +158,15 @@ func (s *Sim) AddPlayer(id string) *SimPlayer {
 	return p
 }
 
+// RemovePlayer tira o jogador do sim de uma vez (estado, carteira e tudo):
+// desconectou da sala, some da simulação e dos próximos broadcasts. Se o ID
+// não existe, é no-op (idempotente).
+func (s *Sim) RemovePlayer(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.players, id)
+}
+
 // GetPlayer retorna o estado simulado de um jogador.
 func (s *Sim) GetPlayer(id string) (*SimPlayer, bool) {
 	s.mu.RLock()
@@ -342,6 +351,21 @@ func (s *Sim) SetMaxHP(id string, maxHP int) error {
 		}
 	}
 	return nil
+}
+
+// ReviveAll revive TODOS os jogadores no início de uma nova fase: vivos com
+// HP cheio (teto individual preservado — upgrades da run nunca regridem), sem
+// respawn pendente. A carteira de moedas NÃO é tocada — a economia da run
+// persiste entre fases e é o que a loja gasta no intervalo.
+func (s *Sim) ReviveAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.players {
+		p.Alive = true
+		p.HP = p.MaxHP
+		p.RespawnIn = 0
+	}
+	s.wiped = false
 }
 
 // IsWiped devolve true quando a squad inteira está morta (squad wipe).

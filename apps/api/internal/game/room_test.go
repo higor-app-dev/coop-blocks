@@ -190,6 +190,102 @@ func TestRoomSnapshot(t *testing.T) {
 	}
 }
 
+// TestRoomSetStateAtualizaJogadorSobLock garante que SetState grava
+// posição/HP e facing (quando != 0) atomicamente, e é no-op para jogador
+// inexistente — é o caminho do handler WS de estado (OnState), concorrente
+// com o loop de simulação e o avanço de fase (ResetToSpawn).
+func TestRoomSetStateAtualizaJogadorSobLock(t *testing.T) {
+	r := NewRoom("default")
+	r.AddPlayer("alice")
+
+	r.SetState("alice", PlayerState{X: 120, Y: 300, HP: 75, Facing: -1})
+	st, ok := r.GetState("alice")
+	if !ok {
+		t.Fatal("GetState(alice) = false, want true")
+	}
+	if st.X != 120 || st.Y != 300 || st.HP != 75 || st.Facing != -1 {
+		t.Errorf("GetState = %+v, want 120/300/75/-1", st)
+	}
+
+	// Facing 0 (ausente/legado) não sobrescreve o anterior.
+	r.SetState("alice", PlayerState{X: 130, Y: 310, HP: 70})
+	st, _ = r.GetState("alice")
+	if st.X != 130 || st.Y != 310 || st.HP != 70 || st.Facing != -1 {
+		t.Errorf("GetState após SetState sem facing = %+v, want 130/310/70/-1", st)
+	}
+
+	// Jogador inexistente: no-op silencioso.
+	r.SetState("ghost", PlayerState{X: 1, Y: 1, HP: 1})
+	if _, ok := r.GetState("ghost"); ok {
+		t.Error("GetState(ghost) = true, want false")
+	}
+}
+
+// TestRoomGetStateDevolveCopia garante que a leitura devolve uma CÓPIA: mexer
+// no valor retornado não afeta o jogador interno (o ponteiro não escapa).
+func TestRoomGetStateDevolveCopia(t *testing.T) {
+	r := NewRoom("default")
+	r.AddPlayer("alice")
+
+	st, _ := r.GetState("alice")
+	st.X = 9999 // mutação na cópia
+
+	st2, _ := r.GetState("alice")
+	if st2.X == 9999 {
+		t.Error("GetState devolveu referência interna (ponteiro escapou)")
+	}
+}
+
 func playerID(n int) string {
 	return "p" + string(rune('0'+n))
+}
+
+// TestRoomResetToSpawnReposicionaTodosNoNovoMapa garante que ResetToSpawn
+// leva todos os jogadores ao spawn do próximo mapa (x, y em pixels), zera
+// velocidades/facing e aplica o HP individual do mapa hps (teto com upgrades
+// do Sim). Jogador sem entrada no mapa mantém o HP atual.
+func TestRoomResetToSpawnReposicionaTodosNoNovoMapa(t *testing.T) {
+	r := NewRoom("default")
+	r.AddPlayer("alice")
+	r.AddPlayer("bob")
+	pA, _ := r.GetPlayer("alice")
+	pB, _ := r.GetPlayer("bob")
+	pA.X, pA.Y, pA.VX, pA.VY, pA.Facing, pA.HP = 5000, 300, 120.5, -80.25, -1, 40
+	pB.X, pB.Y, pB.VX, pB.VY, pB.Facing, pB.HP = 4200, 100, 0, 999, 1, 0
+
+	r.ResetToSpawn(96, 480, map[string]int{"alice": 150, "bob": 125})
+
+	pA, _ = r.GetPlayer("alice")
+	pB, _ = r.GetPlayer("bob")
+	if pA.X != 96 || pA.Y != 480 || pA.HP != 150 {
+		t.Errorf("alice = x%d y%d hp%d, want 96/480/150", pA.X, pA.Y, pA.HP)
+	}
+	if pA.VX != 0 || pA.VY != 0 || pA.Facing != 1 {
+		t.Errorf("alice movimento não zerado: vx%v vy%v facing%d", pA.VX, pA.VY, pA.Facing)
+	}
+	if pB.X != 96 || pB.Y != 480 || pB.HP != 125 {
+		t.Errorf("bob = x%d y%d hp%d, want 96/480/125", pB.X, pB.Y, pB.HP)
+	}
+	if pB.VX != 0 || pB.VY != 0 || pB.Facing != 1 {
+		t.Errorf("bob movimento não zerado: vx%v vy%v facing%d", pB.VX, pB.VY, pB.Facing)
+	}
+}
+
+// TestRoomResetToSpawnSemMapaDeHPMantemHPAtual cobre o caso de jogador fora do
+// mapa hps (ex.: recém-conectado): posição é resetada, HP permanece.
+func TestRoomResetToSpawnSemMapaDeHPMantemHPAtual(t *testing.T) {
+	r := NewRoom("default")
+	r.AddPlayer("carol")
+	pC, _ := r.GetPlayer("carol")
+	pC.X, pC.Y, pC.HP = 3333, 200, 77
+
+	r.ResetToSpawn(96, 480, map[string]int{})
+
+	pC, _ = r.GetPlayer("carol")
+	if pC.X != 96 || pC.Y != 480 {
+		t.Errorf("carol = x%d y%d, want 96/480", pC.X, pC.Y)
+	}
+	if pC.HP != 77 {
+		t.Errorf("carol HP = %d, want 77 (mantido)", pC.HP)
+	}
 }

@@ -551,3 +551,73 @@ func TestSimSetMaxHPRespawnUsaTetoElevado(t *testing.T) {
 		t.Errorf("após respawn = %+v, want alive com 150/150 (teto persiste)", p)
 	}
 }
+
+// TestSimRemovePlayerRemoveDoSimECarteira garante que RemovePlayer tira o
+// jogador do sim (e da carteira de moedas dele) de uma vez — sem ghost na
+// Snapshot após desconectar.
+func TestSimRemovePlayerRemoveDoSimECarteira(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("alice")
+	s.AddPlayer("bob")
+	s.AddCoins("alice", 60)
+
+	s.RemovePlayer("alice")
+
+	if _, ok := s.GetPlayer("alice"); ok {
+		t.Error("alice ainda está no sim após RemovePlayer")
+	}
+	if _, ok := s.GetPlayer("bob"); !ok {
+		t.Error("bob foi removido junto com alice")
+	}
+	for _, sp := range s.Snapshot() {
+		if sp.ID == "alice" {
+			t.Error("alice apareceu na Snapshot após RemovePlayer")
+		}
+	}
+}
+
+// TestSimReviveAllReviveTodosNoInicioDaNovaFase garante que ReviveAll traz
+// todos os jogadores de volta vivos com HP cheio (teto individual preservado —
+// upgrades da run), limpa respawn pendente e NÃO toca a carteira de moedas
+// (economia da run persiste entre fases).
+func TestSimReviveAllReviveTodosNoInicioDaNovaFase(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("alice")
+	s.AddPlayer("bob")
+	// alice morre (agenda respawn); bob fica vivo mas ferido. Ambos têm tetos
+	// diferentes (max_hp da loja em alice).
+	s.SetMaxHP("alice", 125)
+	s.ApplyDamage("alice", 999)
+	s.ApplyDamage("bob", 30)
+	s.AddCoins("alice", 60) // carteira individual — não pode ser tocada
+	s.AddCoins("bob", 40)
+
+	s.ReviveAll()
+
+	alice := simID(s, "alice")
+	bob := simID(s, "bob")
+	if !alice.Alive || alice.HP != 125 || alice.RespawnIn != 0 {
+		t.Errorf("alice = %+v, want viva com HP 125 e sem respawn", alice)
+	}
+	if !bob.Alive || bob.HP != DefaultMaxHP || bob.RespawnIn != 0 {
+		t.Errorf("bob = %+v, want vivo com HP %d e sem respawn", bob, DefaultMaxHP)
+	}
+	if alice.Coins != 60 || bob.Coins != 40 {
+		t.Errorf("carteira alterada: alice=%d bob=%d, want 60/40", alice.Coins, bob.Coins)
+	}
+}
+
+// TestSimReviveAllNaoAlteraTetoJaElevado cobre o caso de jogador vivo que já
+// comprou max_hp: ReviveAll mantém o teto elevado (nunca regride upgrade).
+func TestSimReviveAllNaoAlteraTetoJaElevado(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("carol")
+	s.SetMaxHP("carol", 150)
+
+	s.ReviveAll()
+
+	carol := simID(s, "carol")
+	if carol.MaxHP != 150 || carol.HP != 150 {
+		t.Errorf("carol = %+v, want MaxHP 150 com HP cheio", carol)
+	}
+}

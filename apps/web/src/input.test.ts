@@ -3,8 +3,11 @@ import {
   ACTION_KEYS,
   InputController,
   computeTouchZones,
+  cssToGameScale,
   isPointInZone,
   keyToAction,
+  KEY_ACTIONS,
+  safeAreaToGame,
   type TouchZone,
 } from "./input";
 
@@ -125,6 +128,115 @@ describe("computeTouchZones — safe-area e parâmetros", () => {
   it("nunca reduz o raio abaixo de 48px", () => {
     const small = computeTouchZones({ width: 960, height: 540, radius: 10 });
     for (const z of small) expect(z.radius).toBe(48);
+  });
+});
+
+// ===== cssToGameScale / safeAreaToGame (CSS px → unidades de jogo) =====
+
+describe("cssToGameScale — fator de conversão letterbox", () => {
+  it("tela 16:9 exata → escala = relação dos lados", () => {
+    expect(cssToGameScale(1920, 1080, 960, 540)).toBe(2);
+  });
+
+  it("tela retrato estreita → escala pela largura (o fator menor)", () => {
+    // 390x844 vs 960x540: min(390/960, 844/540) = 0.40625
+    expect(cssToGameScale(390, 844, 960, 540)).toBeCloseTo(390 / 960, 6);
+  });
+
+  it("tela ultrawide → escala pela altura", () => {
+    // 3440x1440 vs 960x540: min(3.583, 2.667) = 8/3
+    expect(cssToGameScale(3440, 1440, 960, 540)).toBeCloseTo(8 / 3, 6);
+  });
+
+  it("dimensões inválidas → 1 (sem divisão por zero)", () => {
+    expect(cssToGameScale(0, 540, 960, 540)).toBe(1);
+    expect(cssToGameScale(960, 0, 960, 540)).toBe(1);
+    expect(cssToGameScale(-100, 540, 960, 540)).toBe(1);
+  });
+});
+
+describe("safeAreaToGame — insetos CSS px → unidades de jogo", () => {
+  it("divide cada inset pela escala", () => {
+    expect(
+      safeAreaToGame({ top: 47, bottom: 34, left: 0, right: 0 }, 2)
+    ).toEqual({ top: 23.5, bottom: 17, left: 0, right: 0 });
+  });
+
+  it("escala ≤ 0 → insetos preservados (fallback)", () => {
+    const safe = { top: 10, bottom: 10, left: 10, right: 10 };
+    expect(safeAreaToGame(safe, 0)).toEqual(safe);
+    expect(safeAreaToGame(safe, -1)).toEqual(safe);
+  });
+
+  it("escala 1 → valores intactos", () => {
+    const safe = { top: 8, bottom: 8, left: 0, right: 0 };
+    expect(safeAreaToGame(safe, 1)).toEqual(safe);
+  });
+
+  it("letterbox retrato: inset dentro da barra → 0 no espaço do jogo", () => {
+    // css 390x844, jogo 960x540 → escala 390/960, barra vertical ~312px.
+    // O inset inferior (home indicator) cai inteiro na barra → não desloca
+    // nada do jogo; idem o topo (notch).
+    const s = 390 / 960;
+    const bar = (844 - 540 * s) / 2; // ≈ 312.3
+    const safe = safeAreaToGame(
+      { top: 47, bottom: 34, left: 20, right: 0 },
+      s,
+      { w: 390, h: 844 },
+      { w: 960, h: 540 }
+    );
+    expect(safe.bottom).toBe(0);
+    expect(safe.top).toBe(0);
+    // laterais não têm barra (o jogo encosta nas bordas) → escala simples
+    expect(safe.left).toBeCloseTo(20 / s, 6);
+    expect(safe.right).toBe(0);
+    expect(bar).toBeGreaterThan(47); // sanity: notch dentro da barra
+  });
+
+  it("ultrawide: inset lateral dentro da barra → 0; inferior sem barra → escala", () => {
+    // css 3440x1440, jogo 960x540 → escala 8/3, barras laterais 440px.
+    const s = 8 / 3;
+    const safe = safeAreaToGame(
+      { top: 0, bottom: 34, left: 20, right: 20 },
+      s,
+      { w: 3440, h: 1440 },
+      { w: 960, h: 540 }
+    );
+    expect(safe.left).toBe(0);
+    expect(safe.right).toBe(0);
+    expect(safe.bottom).toBeCloseTo(34 / s, 6);
+  });
+
+  it("16:9 exato (sem barra): inset vira unidades pela escala", () => {
+    // css 1280x720, jogo 960x540 → escala 4/3, sem barras
+    const safe = safeAreaToGame(
+      { top: 0, bottom: 34, left: 0, right: 0 },
+      4 / 3,
+      { w: 1280, h: 720 },
+      { w: 960, h: 540 }
+    );
+    expect(safe.bottom).toBeCloseTo(34 / (4 / 3), 6); // 25.5
+  });
+
+  it("sem dimensões CSS → divisão simples (sem barras)", () => {
+    const safe = safeAreaToGame({ top: 0, bottom: 34, left: 0, right: 0 }, 2);
+    expect(safe).toEqual({ top: 0, bottom: 17, left: 0, right: 0 });
+  });
+});
+
+// ===== KEY_ACTIONS (mapa teclado → ação, contrato desktop) =====
+
+describe("KEY_ACTIONS — contrato de teclado", () => {
+  it("setas/A/D movem, espaço pula, J e X atiram", () => {
+    expect(KEY_ACTIONS).toMatchObject({
+      left: "left",
+      right: "right",
+      a: "left",
+      d: "right",
+      space: "jump",
+      j: "shoot",
+      x: "shoot", // compat com o bind legado do main.ts
+    });
   });
 });
 

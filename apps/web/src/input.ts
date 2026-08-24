@@ -104,7 +104,10 @@ const KEY_ACTIONS: Readonly<Record<string, ActionName>> = {
   d: "right",
   space: "jump",
   j: "shoot",
+  // compat com o bind legado do main.ts (X também atira)
+  x: "shoot",
 };
+export { KEY_ACTIONS };
 
 /**
  * Traduz o nome de uma tecla Kaplay na ação correspondente (legado, puro).
@@ -190,13 +193,89 @@ export function isPointInZone(zone: TouchZone, p: Vec2Like): boolean {
 }
 
 /**
+ * Fator de conversão CSS px → unidades de jogo sob letterbox.
+ *
+ * Com letterbox o viewport do jogo (k.width()×k.height(), ex.: 960x540) é
+ * escalado para caber no canvas; o fator uniforme é min(cssW/gameW,
+ * cssH/gameH). Dimensões inválidas (0/negativo) retornam 1 — sem divisão por
+ * zero. Função pura — testável sem DOM/Kaplay.
+ */
+export function cssToGameScale(
+  cssW: number,
+  cssH: number,
+  gameW: number,
+  gameH: number
+): number {
+  if (cssW <= 0 || cssH <= 0 || gameW <= 0 || gameH <= 0) return 1;
+  return Math.min(cssW / gameW, cssH / gameH);
+}
+
+/**
+ * Converte insetos de safe-area de CSS px para unidades de jogo.
+ *
+ * `scale` é o fator de `cssToGameScale`. Quando css/game são informados,
+ * desconta a barra do letterbox antes de converter: o trecho do inset que
+ * cai na barra (fora da área do jogo) não desloca elementos do jogo. Sem
+ * dimensões CSS (ou escala ≤ 0) faz a divisão simples — fallback preserva
+ * os insetos quando a escala é inválida.
+ */
+export function safeAreaToGame(
+  safe: SafeArea,
+  scale: number,
+  css?: { w: number; h: number },
+  game?: { w: number; h: number }
+): SafeArea {
+  const s = scale > 0 ? scale : 1;
+  // Barra do letterbox em CSS px por borda (0 quando o jogo encosta nela).
+  let barTop = 0;
+  let barRight = 0;
+  let barBottom = 0;
+  let barLeft = 0;
+  if (
+    css &&
+    game &&
+    css.w > 0 &&
+    css.h > 0 &&
+    game.w > 0 &&
+    game.h > 0
+  ) {
+    const vpW = game.w * s;
+    const vpH = game.h * s;
+    barLeft = Math.max(0, (css.w - vpW) / 2);
+    barRight = barLeft;
+    barTop = Math.max(0, (css.h - vpH) / 2);
+    barBottom = barTop;
+  }
+  const toGame = (inset: number, bar: number): number =>
+    Math.max(0, inset - bar) / s;
+  return {
+    top: toGame(safe.top, barTop),
+    right: toGame(safe.right, barRight),
+    bottom: toGame(safe.bottom, barBottom),
+    left: toGame(safe.left, barLeft),
+  };
+}
+
+/**
  * Lê os insetos de safe-area do CSS env(safe-area-inset-*). Em ambiente sem
  * DOM (vitest/node) ou quando o browser não suporta env(), retorna 0s.
+ *
+ * O resultado é cacheado por orientação (retrato/paisagem): os insetos só
+ * mudam na rotação, e este helper é consultado a cada evento de toque
+ * (hit-test de zonas) — sondar o DOM por chamada causaria jank no mobile.
  */
 export function readSafeArea(): SafeArea {
   const zero: SafeArea = { top: 0, bottom: 0, left: 0, right: 0 };
   if (typeof document === "undefined") return zero;
   try {
+    const key =
+      typeof window !== "undefined" &&
+      (window.matchMedia?.("(orientation: portrait)").matches ?? true)
+        ? "portrait"
+        : "landscape";
+    if (safeAreaCacheKey === key && safeAreaCacheValue) {
+      return safeAreaCacheValue;
+    }
     const probe = document.createElement("div");
     probe.style.cssText =
       "position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;" +
@@ -215,10 +294,26 @@ export function readSafeArea(): SafeArea {
       left: parse(cs.paddingLeft),
     };
     probe.remove();
+    safeAreaCacheKey = key;
+    safeAreaCacheValue = safe;
     return safe;
   } catch {
     return zero;
   }
+}
+
+/** Cache por orientação do probe de safe-area (ver readSafeArea). */
+let safeAreaCacheKey = "";
+let safeAreaCacheValue: SafeArea | null = null;
+
+// Os insetos também mudam quando a barra do browser recolhe/expande (sem
+// rotação) — invalidar no resize mantém o cache fresco sem sondar o DOM a
+// cada toque. Guard para ambientes sem window (vitest/node).
+if (typeof window !== "undefined") {
+  window.addEventListener("resize", () => {
+    safeAreaCacheKey = "";
+    safeAreaCacheValue = null;
+  });
 }
 
 // ===== Máquina de estado de input (pura, sem DOM/Kaplay) =====
@@ -373,10 +468,26 @@ export function createInput(k: KAPLAYCtx, opts: CreateInputOpts = {}): GameInput
   const getZones: () => TouchZone[] =
     opts.zones ??
     (() => {
+      // Coordenadas de JOGO (k.width()×k.height(), ex.: 960x540): o Kaplay
+      // converte eventos de toque para esse espaço (letterbox + transform do
+      // viewport), então as zonas precisam viver aqui. canvas.width/height
+      // são o buffer em px de dispositivo (dpr) — usá-los quebraria o
+      // hit-test em telas retina (zonas fora de escala e posição).
+      const gameW = k.width();
+      const gameH = k.height();
       const canvas = k.canvas;
-      const width = canvas?.width ?? 960;
-      const height = canvas?.height ?? 540;
-      return computeTouchZones({ width, height, safe: readSafeArea() });
+      const dpr =
+        typeof window !== "undefined"
+          ? Math.min(window.devicePixelRatio || 1, 2)
+          : 1;
+      const cssW = canvas?.offsetWidth || (canvas?.width ?? gameW) / dpr;
+      const cssH = canvas?.offsetHeight || (canvas?.height ?? gameH) / dpr;
+      const scale = cssToGameScale(cssW, cssH, gameW, gameH);
+      return computeTouchZones({
+        width: gameW,
+        height: gameH,
+        safe: safeAreaToGame(readSafeArea(), scale, { w: cssW, h: cssH }, { w: gameW, h: gameH }),
+      });
     });
 
   const zoneAt = (p: Vec2Like): TouchZoneId | null => {

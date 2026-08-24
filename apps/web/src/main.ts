@@ -3,7 +3,8 @@ import { createPlayer } from "./player";
 import { spawnEnemy } from "./enemies";
 import { generateLevel, TILE } from "./levelgen";
 import { connectToServer, type NetPlayer } from "./net";
-import { ACTION_KEYS, keyToAction } from "./input";
+import { createInput } from "./input";
+import { computeButtonSpecs } from "./touch-buttons";
 import {
   createHud,
   formatDeathMessage,
@@ -68,13 +69,19 @@ function scheduleRefit() {
   cancelAnimationFrame(refitRaf);
   refitRaf = requestAnimationFrame(refitCanvas);
 }
-window.addEventListener("resize", scheduleRefit);
-window.addEventListener("orientationchange", () => setTimeout(scheduleRefit, 150));
+window.addEventListener("resize", () => {
+  scheduleRefit();
+  refreshTouchButtons();
+});
+window.addEventListener("orientationchange", () => {
+  // iOS atrasa o resize do layout — o timeout cobre o intervalo; o refresh
+  // dos botões usa o mesmo ritmo (safe-area só muda na rotação).
+  setTimeout(scheduleRefit, 150);
+  setTimeout(refreshTouchButtons, 150);
+});
 
 const {
   add,
-  onKeyDown,
-  onKeyPress,
   onUpdate,
   onCollide,
   vec2,
@@ -86,6 +93,10 @@ const {
   body,
   scale,
   z,
+  fixed,
+  anchor,
+  outline,
+  rgb,
   destroy,
   wait,
   rand,
@@ -258,32 +269,66 @@ const server = connectToServer(k, {
   },
 });
 
-// ===== Controles =====
-// Teclas de "segurar" (movimento) via onKeyDown; ações pontuais via onKeyPress.
-// Pulo/tiro disparam som + partículas no momento do gesto; o pulo só toca
-// quando o jogador está no chão (o som acompanha o salto real).
-const HOLD_KEYS = new Set(["left", "right"]);
-for (const key of ACTION_KEYS) {
-  const bind = HOLD_KEYS.has(key) ? onKeyDown : onKeyPress;
-  bind(key, () => {
-    const action = keyToAction(key);
-    if (action?.type === "move") player.movePlayer(action.dir);
-    else if (action?.type === "jump") {
-      if (player.isGrounded()) {
-        playJump();
-        particles.spawnDust(player.pos.x, player.pos.y + 20, 90);
-      }
-      player.jumpPlayer();
-    } else if (action?.type === "shoot") {
-      playShoot();
-      particles.spawnShootImpact(
-        player.pos.x + player.facing * 24,
-        player.pos.y - 10
-      );
-      player.shoot();
-    }
-  });
+// ===== Controles (input adaptativo: teclado + touch) =====
+// O input.ts é a camada única de entrada e NÃO desenha nada: no desktop,
+// setas/A/D movem, espaço pula e J atira; no touch, zonas virtuais nos cantos
+// inferiores (◀ ▶ à esquerda, PULO/TIRO à direita) são hit-testadas nos
+// eventos de toque. Aqui instanciamos os botões touch como elementos Kaplay
+// fixos na tela e consumimos o estado digital por frame (poll) — pulo/tiro
+// disparam uma única vez por gesto (borda limpa pelo poll), sem repetição
+// contínua enquanto tecla/zona é segurada.
+const input = createInput(k, {
+  onModeChange: (mode) => setTouchButtonsVisible(mode === "touch"),
+});
+
+// Botões touch: elementos decorativos (fixed + z alto) — o hit-test é feito
+// pelo input.ts sobre as zonas, independente dos visuais. Ficam atrás do
+// overlay DOM do HUD (z-index 20, cobre o canvas inteiro), então nunca
+// escondem vidas/placar/energia; a posição casa com o centro das zonas.
+// Fundo sólido (sem alpha: no kaplay 3001 cor não tem canal a, e opacity do
+// pai seria multiplicada nos filhos — o texto ficaria transparente junto).
+const TOUCH_BTN_Z = 50;
+const touchButtons = computeButtonSpecs(input.getZones()).map((spec) => {
+  const btn = add([
+    "touch-btn",
+    fixed(),
+    pos(spec.x - spec.size / 2, spec.y - spec.size / 2),
+    rect(spec.size, spec.size, { radius: spec.size * 0.22 }),
+    color(36, 40, 64),
+    outline(2, rgb(200, 208, 224)),
+    z(TOUCH_BTN_Z),
+  ]);
+  btn.add([
+    text(spec.label, { size: Math.max(14, Math.round(spec.size * 0.38)) }),
+    pos(spec.size / 2, spec.size / 2),
+    anchor("center"),
+    color(255, 255, 255),
+  ]);
+  btn.hidden = true; // só aparecem no modo touch
+  return btn;
+});
+
+function setTouchButtonsVisible(visible: boolean): void {
+  for (const btn of touchButtons) btn.hidden = !visible;
 }
+
+// Re-posiciona os botões conforme as zonas atuais (safe-area muda na rotação;
+// as zonas vivem em coordenadas de jogo, constantes sob resize).
+function refreshTouchButtons(): void {
+  const specs = computeButtonSpecs(input.getZones());
+  // Guarda de robustez: specs e botões vêm da mesma fonte (4 zonas fixas),
+  // mas nunca indexar fora do array se o layout mudar.
+  if (specs.length !== touchButtons.length) return;
+  for (let i = 0; i < touchButtons.length; i++) {
+    const s = specs[i];
+    touchButtons[i].pos = vec2(s.x - s.size / 2, s.y - s.size / 2);
+  }
+}
+
+// Modo inicial já decidido pelo input (k.isTouchscreen()); o onModeChange
+// acima ajusta a visibilidade quando o primeiro input real travar um modo.
+setTouchButtonsVisible(input.isTouchMode());
+refreshTouchButtons();
 
 // ===== Câmera segue o jogador + HUD a cada frame =====
 // O estado do HUD é montado do estado real do jogo e passado para o módulo
@@ -325,10 +370,44 @@ function buildHudState(): HudState {
   };
 }
 
-// Poeira ao aterrissar: detecta a transição no-ar → chão e solta partículas
-// nos pés do jogador (sem som dedicado — o pulo já tem o seu).
+// ===== Loop: input por frame + poeira de aterrissagem + câmera + HUD =====
+// O input é consumido via poll() UMA vez por frame: o snapshot traz a
+// direção (segurar = mover contínuo) e bordas de pulo/tiro (disparam 1x por
+// gesto; o próprio poll limpa as bordas, então segurar não re-dispara).
+//
+// A loja (overlay DOM .shop-root criado por shop.ts) pausa o mundo no
+// servidor; durante ela o input local é ignorado para o jogador não se mover
+// "sozinho" atrás do overlay. Antes da loja existir no DOM (.shop-root
+// ausente) a consulta retorna false — o jogo roda só na fase 1.
+function shopOpen(): boolean {
+  const el = document.querySelector<HTMLElement>(".shop-root");
+  return !!el && el.style.display !== "none";
+}
+
 let wasGrounded = true;
 onUpdate(() => {
+  const frame = input.poll();
+
+  // Consome o estado apenas fora da loja (mundo pausado no servidor).
+  if (!shopOpen() && player.exists()) {
+    player.movePlayer(frame.direction);
+    if (frame.jumpPressed) {
+      if (player.isGrounded()) {
+        playJump();
+        particles.spawnDust(player.pos.x, player.pos.y + 20, 90);
+      }
+      player.jumpPlayer();
+    }
+    if (frame.shootPressed) {
+      playShoot();
+      particles.spawnShootImpact(
+        player.pos.x + player.facing * 24,
+        player.pos.y - 10
+      );
+      player.shoot();
+    }
+  }
+
   const grounded = player.exists() && player.isGrounded();
   if (grounded && !wasGrounded) {
     particles.spawnDust(player.pos.x, player.pos.y + 20);

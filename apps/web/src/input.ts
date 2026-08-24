@@ -1,31 +1,451 @@
 /**
- * Parsing/tratamento de input do teclado — módulo puro (sem kaplay).
+ * Camada única de input do jogo (teclado + touch).
  *
- * Mapeia nomes de tecla para ações do jogador. O bind real (onKeyDown /
- * onKeyPress) acontece no main.ts; aqui fica só a lógica de tradução,
- * testável isoladamente.
+ * Responsabilidades:
+ * - Detectar o modo de entrada (touch vs teclado), usando k.isTouchscreen()
+ *   do Kaplay como chute inicial e eventos de teclado/toque para decidir de
+ *   forma definitiva: o PRIMEIRO input real (keydown ou toque) trava o modo.
+ * - Teclado (desktop): setas esquerda/direita, A/D, Espaço (pulo) e J (tiro).
+ *   Expõe estado digital de direção (-1/0/1), jumpPressed e shootPressed com
+ *   detecção de borda — dispara uma única vez por pressão, sem repetição
+ *   contínua enquanto a tecla é segurada.
+ * - Touch (mobile): zonas virtuais generosas (raio ≥ 48px) no canto inferior
+ *   esquerdo (◀ ▶) e inferior direito (PULO, TIRO), respeitando safe-area.
+ *
+ * O módulo NÃO desenha botões: expõe os retângulos/centros das zonas e APIs
+ * para o main.ts criar os sprites e fazer hit-test de pontos nas zonas.
+ *
+ * Partes puras (computeTouchZones, isPointInZone, InputController) não tocam
+ * em DOM/Kaplay e são testáveis isoladamente com vitest. A fiação real com o
+ * Kaplay acontece em createInput(k).
  */
+
+import type { KAPLAYCtx, KEventController } from "kaplay";
+
+// ===== Tipos públicos =====
+
+/** Modo de entrada atual. */
+export type InputMode = "touch" | "keyboard";
+
+/** Nome canônico de ação do jogador. */
+export type ActionName = "left" | "right" | "jump" | "shoot";
+
+/**
+ * Estado digital consumido pelo game loop (uma vez por frame, via poll()).
+ * jumpPressed/shootPressed são borda: true apenas no poll seguinte à
+ * pressão, e false em seguida mesmo que a tecla/zona continue pressionada.
+ */
+export interface InputFrame {
+  direction: -1 | 0 | 1;
+  jumpPressed: boolean;
+  shootPressed: boolean;
+}
+
+export interface Vec2Like {
+  x: number;
+  y: number;
+}
+
+export interface RectLike {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export type TouchZoneId = "left" | "right" | "jump" | "shoot";
+
+/**
+ * Zona virtual de toque. center/radius servem para hit-test (polegar);
+ * rect serve para o main.ts desenhar o botão.
+ */
+export interface TouchZone {
+  id: TouchZoneId;
+  center: Vec2Like;
+  radius: number;
+  rect: RectLike;
+}
+
+/** Insetos de safe-area (notch/home bar), em px, lidos do CSS env(). */
+export interface SafeArea {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+// ===== Mapeamento de teclas (desktop) =====
+
+/** Teclas ligadas no main.ts atual (legado, compatível com o bind antigo). */
+export const ACTION_KEYS = ["left", "right", "space", "x"] as const;
 
 export type PlayerAction =
   | { type: "move"; dir: -1 | 1 }
   | { type: "jump" }
   | { type: "shoot" };
 
-/** Teclas reconhecidas, na ordem em que o main.ts faz o bind. */
-export const ACTION_KEYS = ["left", "right", "space", "x"] as const;
-
+/** Mapa completo tecla Kaplay → ação. Cobre setas, WASD, espaço e J. */
 const KEY_TO_ACTION: Readonly<Record<string, PlayerAction>> = {
   left: { type: "move", dir: -1 },
   right: { type: "move", dir: 1 },
+  a: { type: "move", dir: -1 },
+  d: { type: "move", dir: 1 },
   space: { type: "jump" },
+  j: { type: "shoot" },
+  // mantido por compatibilidade com o bind legado do main.ts
   x: { type: "shoot" },
 };
 
+/** Teclas que alimentam o InputController (estado digital com borda). */
+const KEY_ACTIONS: Readonly<Record<string, ActionName>> = {
+  left: "left",
+  right: "right",
+  a: "left",
+  d: "right",
+  space: "jump",
+  j: "shoot",
+};
+
 /**
- * Traduz o nome de uma tecla na ação correspondente.
+ * Traduz o nome de uma tecla Kaplay na ação correspondente (legado, puro).
  * Normaliza para minúsculas; teclas desconhecidas retornam null (não lança).
  */
 export function keyToAction(key: string): PlayerAction | null {
   if (typeof key !== "string") return null;
   return KEY_TO_ACTION[key.toLowerCase()] ?? null;
+}
+
+// ===== Geometria das zonas de toque (pura) =====
+
+export interface TouchZoneLayoutOpts {
+  /** Largura do canvas (coordenadas internas do jogo). */
+  width: number;
+  /** Altura do canvas (coordenadas internas do jogo). */
+  height: number;
+  /** Insetos de safe-area nas mesmas coordenadas (default: 0). */
+  safe?: Partial<SafeArea>;
+  /** Raio mínimo da zona de toque (default 56; nunca abaixo de 48). */
+  radius?: number;
+  /** Margem das bordas do canvas (default 12). */
+  margin?: number;
+  /** Espaço entre botões (default 16). */
+  gap?: number;
+}
+
+/**
+ * Calcula as zonas virtuais de toque:
+ * - ◀ ▶ no canto inferior esquerdo (movimento);
+ * - PULO no canto inferior direito e TIRO logo acima dele (polegar direito).
+ *
+ * Zonas generosas para polegar (raio ≥ 48px) e deslocadas pelos insetos de
+ * safe-area. Função pura — não toca em DOM/Kaplay.
+ */
+export function computeTouchZones(opts: TouchZoneLayoutOpts): TouchZone[] {
+  const { width, height } = opts;
+  const safe: SafeArea = { top: 0, bottom: 0, left: 0, right: 0, ...opts.safe };
+  const radius = Math.max(48, opts.radius ?? 56);
+  const margin = Math.max(8, opts.margin ?? 12);
+  const gap = Math.max(8, opts.gap ?? 16);
+  const d = radius * 2;
+
+  const bottomY = height - safe.bottom - margin;
+  const leftX = safe.left + margin;
+
+  const left: TouchZone = {
+    id: "left",
+    center: { x: leftX + radius, y: bottomY - radius },
+    radius,
+    rect: { x: leftX, y: bottomY - d, w: d, h: d },
+  };
+
+  const right: TouchZone = {
+    id: "right",
+    center: { x: left.center.x + d + gap, y: left.center.y },
+    radius,
+    rect: { x: left.rect.x + d + gap, y: left.rect.y, w: d, h: d },
+  };
+
+  const jump: TouchZone = {
+    id: "jump",
+    center: { x: width - safe.right - margin - radius, y: bottomY - radius },
+    radius,
+    rect: { x: width - safe.right - margin - d, y: bottomY - d, w: d, h: d },
+  };
+
+  const shoot: TouchZone = {
+    id: "shoot",
+    center: { x: jump.center.x, y: jump.center.y - d - gap },
+    radius,
+    rect: { x: jump.rect.x, y: jump.rect.y - d - gap, w: d, h: d },
+  };
+
+  return [left, right, jump, shoot];
+}
+
+/** Hit-test circular: ponto dentro do raio da zona? (pura) */
+export function isPointInZone(zone: TouchZone, p: Vec2Like): boolean {
+  const dx = p.x - zone.center.x;
+  const dy = p.y - zone.center.y;
+  return dx * dx + dy * dy <= zone.radius * zone.radius;
+}
+
+/**
+ * Lê os insetos de safe-area do CSS env(safe-area-inset-*). Em ambiente sem
+ * DOM (vitest/node) ou quando o browser não suporta env(), retorna 0s.
+ */
+export function readSafeArea(): SafeArea {
+  const zero: SafeArea = { top: 0, bottom: 0, left: 0, right: 0 };
+  if (typeof document === "undefined") return zero;
+  try {
+    const probe = document.createElement("div");
+    probe.style.cssText =
+      "position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;" +
+      "padding:env(safe-area-inset-top) env(safe-area-inset-right) " +
+      "env(safe-area-inset-bottom) env(safe-area-inset-left);";
+    document.body.appendChild(probe);
+    const cs = getComputedStyle(probe);
+    const parse = (v: string): number => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    };
+    const safe: SafeArea = {
+      top: parse(cs.paddingTop),
+      right: parse(cs.paddingRight),
+      bottom: parse(cs.paddingBottom),
+      left: parse(cs.paddingLeft),
+    };
+    probe.remove();
+    return safe;
+  } catch {
+    return zero;
+  }
+}
+
+// ===== Máquina de estado de input (pura, sem DOM/Kaplay) =====
+
+export interface InputControllerOpts {
+  /** Modo inicial (default "keyboard"). Em runtime, createInput passa k.isTouchscreen(). */
+  initialMode?: InputMode;
+  /** Chamado quando o modo muda por causa do primeiro input real. */
+  onModeChange?: (mode: InputMode) => void;
+}
+
+/**
+ * Controlador de input puro: recebe eventos (pressKey/releaseKey/touchStart/
+ * touchEnd) e produz o estado digital via poll().
+ *
+ * Detecção de borda: jumpPressed/shootPressed viram true apenas na transição
+ * solto → pressionado; segurar não re-dispara (imune a auto-repeat do teclado
+ * e a onKeyPress repetido do Kaplay).
+ *
+ * Modo: o primeiro input real (keydown ou toque) trava o modo; antes disso o
+ * modo inicial (k.isTouchscreen()) vale.
+ */
+export class InputController {
+  private mode: InputMode;
+  private modeLocked = false;
+  private onModeChange?: (mode: InputMode) => void;
+  private keys = new Set<ActionName>();
+  private touchZones = new Set<TouchZoneId>();
+  private jumpEdge = false;
+  private shootEdge = false;
+
+  constructor(opts: InputControllerOpts = {}) {
+    this.mode = opts.initialMode ?? "keyboard";
+    this.onModeChange = opts.onModeChange;
+  }
+
+  getMode(): InputMode {
+    return this.mode;
+  }
+
+  isTouchMode(): boolean {
+    return this.mode === "touch";
+  }
+
+  /**
+   * Registra o primeiro input real e trava o modo definitivamente.
+   * "Tocar na tela antes de um keydown deve marcar o modo como touch" —
+   * e simetricamente, keydown antes de qualquer toque marca teclado.
+   */
+  private noteInput(mode: InputMode): void {
+    if (this.modeLocked) return;
+    this.modeLocked = true;
+    if (mode !== this.mode) {
+      this.mode = mode;
+      this.onModeChange?.(mode);
+    }
+  }
+
+  pressKey(action: ActionName): void {
+    this.noteInput("keyboard");
+    if (this.keys.has(action)) return; // segurando: sem re-disparo de borda
+    this.keys.add(action);
+    if (action === "jump") this.jumpEdge = true;
+    if (action === "shoot") this.shootEdge = true;
+  }
+
+  releaseKey(action: ActionName): void {
+    this.keys.delete(action);
+  }
+
+  /** Toque começou numa zona (ou fora de qualquer zona: null ainda marca touch). */
+  touchStart(zone: TouchZoneId | null): void {
+    this.noteInput("touch");
+    if (zone === null) return;
+    if (this.touchZones.has(zone)) return; // dedo já ativo na zona
+    this.touchZones.add(zone);
+    if (zone === "jump") this.jumpEdge = true;
+    if (zone === "shoot") this.shootEdge = true;
+  }
+
+  /** Toque saiu da zona (dedo levantado ou deslizado para fora). */
+  touchEnd(zone: TouchZoneId | null): void {
+    if (zone === null) return;
+    this.touchZones.delete(zone);
+  }
+
+  /**
+   * Snapshot do estado digital para o frame atual. Limpa as bordas de
+   * jump/shoot — chame uma vez por frame no game loop.
+   */
+  poll(): InputFrame {
+    const left = this.keys.has("left") || this.touchZones.has("left");
+    const right = this.keys.has("right") || this.touchZones.has("right");
+    const direction: -1 | 0 | 1 = left && right ? 0 : left ? -1 : right ? 1 : 0;
+    const frame: InputFrame = {
+      direction,
+      jumpPressed: this.jumpEdge,
+      shootPressed: this.shootEdge,
+    };
+    this.jumpEdge = false;
+    this.shootEdge = false;
+    return frame;
+  }
+
+  /** Zera todo o estado (útil em reset de fase). */
+  reset(): void {
+    this.keys.clear();
+    this.touchZones.clear();
+    this.jumpEdge = false;
+    this.shootEdge = false;
+  }
+}
+
+// ===== Fiação com o Kaplay =====
+
+export interface CreateInputOpts {
+  /** Chamado quando o modo muda após o primeiro input real. */
+  onModeChange?: (mode: InputMode) => void;
+  /** Layout customizado de zonas (default: computeTouchZones com tamanho do canvas). */
+  zones?: () => TouchZone[];
+}
+
+/** API exposta para o main.ts consumir. */
+export interface GameInput {
+  getMode(): InputMode;
+  isTouchMode(): boolean;
+  /** Snapshot do estado do frame (limpa bordas). Chame uma vez por frame. */
+  poll(): InputFrame;
+  /** Zonas virtuais atuais (para desenhar botões e hit-test). */
+  getZones(): TouchZone[];
+  /** Hit-test circular de um ponto em uma zona. */
+  isPointInZone(zone: TouchZone, p: Vec2Like): boolean;
+  /** Desliga os listeners registrados no Kaplay. */
+  destroy(): void;
+}
+
+/**
+ * Cria a camada de input ligada ao Kaplay:
+ * - k.isTouchscreen() define o modo inicial;
+ * - onKeyPress/onKeyRelease (setas, A/D, Espaço, J) alimentam o estado;
+ * - onTouchStart/Move/End fazem hit-test nas zonas virtuais (coordenadas de
+ *   jogo, já convertidas pelo Kaplay) e alimentam o estado de toque.
+ *
+ * NÃO desenha nada — só estado, zonas e APIs de consulta.
+ */
+export function createInput(k: KAPLAYCtx, opts: CreateInputOpts = {}): GameInput {
+  const controller = new InputController({
+    initialMode: k.isTouchscreen() ? "touch" : "keyboard",
+    onModeChange: opts.onModeChange,
+  });
+
+  const getZones: () => TouchZone[] =
+    opts.zones ??
+    (() => {
+      const canvas = k.canvas;
+      const width = canvas?.width ?? 960;
+      const height = canvas?.height ?? 540;
+      return computeTouchZones({ width, height, safe: readSafeArea() });
+    });
+
+  const zoneAt = (p: Vec2Like): TouchZoneId | null => {
+    for (const zone of getZones()) {
+      if (isPointInZone(zone, p)) return zone.id;
+    }
+    return null;
+  };
+
+  const evts: KEventController[] = [];
+
+  // Teclado: onKeyPress dispara no keydown (inclusive auto-repeat do sistema);
+  // o InputController ignora repeats porque a borda só dispara na transição
+  // solto → pressionado.
+  evts.push(
+    k.onKeyPress((key) => {
+      const action = KEY_ACTIONS[key];
+      if (action) controller.pressKey(action);
+    })
+  );
+
+  evts.push(
+    k.onKeyRelease((key) => {
+      const action = KEY_ACTIONS[key];
+      if (action) controller.releaseKey(action);
+    })
+  );
+
+  // Touch: um dedo pode se mover entre zonas; acompanhamos por touch id
+  // (Touch.identifier da DOM — o kaplay repassa o Touch nativo).
+  const activeTouches = new Map<number, TouchZoneId | null>();
+
+  evts.push(
+    k.onTouchStart((pos, t) => {
+      const zone = zoneAt(pos);
+      activeTouches.set(t.identifier, zone);
+      controller.touchStart(zone);
+    })
+  );
+
+  evts.push(
+    k.onTouchMove((pos, t) => {
+      const zone = zoneAt(pos);
+      const prev = activeTouches.get(t.identifier) ?? null;
+      if (zone === prev) return;
+      if (prev) controller.touchEnd(prev);
+      activeTouches.set(t.identifier, zone);
+      if (zone) controller.touchStart(zone);
+    })
+  );
+
+  evts.push(
+    k.onTouchEnd((_pos, t) => {
+      const prev = activeTouches.get(t.identifier) ?? null;
+      activeTouches.delete(t.identifier);
+      if (prev) controller.touchEnd(prev);
+    })
+  );
+
+  return {
+    getMode: () => controller.getMode(),
+    isTouchMode: () => controller.isTouchMode(),
+    poll: () => controller.poll(),
+    getZones,
+    isPointInZone,
+    destroy: () => {
+      for (const evt of evts) evt.cancel();
+      evts.length = 0;
+      activeTouches.clear();
+    },
+  };
 }

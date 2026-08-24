@@ -174,8 +174,11 @@ func TestRoomRemovePlayerAoDesconectar(t *testing.T) {
 
 func TestRoomSnapshot(t *testing.T) {
 	r := NewRoom("sala")
+	ids := map[string]bool{}
 	for i := 0; i < 2; i++ {
-		if _, err := r.Join(playerID(i), ""); err != nil {
+		id := playerID(i)
+		ids[id] = true
+		if _, err := r.Join(id, ""); err != nil {
 			t.Fatalf("join %d: %v", i, err)
 		}
 	}
@@ -186,6 +189,11 @@ func TestRoomSnapshot(t *testing.T) {
 	for _, st := range got {
 		if st.HP != 100 {
 			t.Errorf("Snapshot HP = %d, want 100", st.HP)
+		}
+		// O wire precisa do id do jogador (welcome/WorldMsg) — o client filtra
+		// o próprio jogador e casa coinCounts por id.
+		if !ids[st.ID] {
+			t.Errorf("Snapshot ID = %q, want um dos ids da sala", st.ID)
 		}
 	}
 }

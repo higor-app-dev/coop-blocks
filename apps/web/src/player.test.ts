@@ -117,7 +117,7 @@ describe("jumpPlayer — pulo", () => {
   it("pula com força padrão 520 quando grounded", () => {
     const { engine } = makeFakeEngine();
     const p = createPlayer(engine, { pos: { x: 0, y: 0 }, maxHp: 100 });
-    p.isGrounded.mockReturnValue(true);
+    (p.isGrounded as ReturnType<typeof vi.fn>).mockReturnValue(true);
     p.jumpPlayer();
     expect(p.jump).toHaveBeenCalledWith(520);
   });
@@ -125,7 +125,7 @@ describe("jumpPlayer — pulo", () => {
   it("aceita força customizada", () => {
     const { engine } = makeFakeEngine();
     const p = createPlayer(engine, { pos: { x: 0, y: 0 }, maxHp: 100 });
-    p.isGrounded.mockReturnValue(true);
+    (p.isGrounded as ReturnType<typeof vi.fn>).mockReturnValue(true);
     p.jumpPlayer(700);
     expect(p.jump).toHaveBeenCalledWith(700);
   });
@@ -133,7 +133,7 @@ describe("jumpPlayer — pulo", () => {
   it("não pula no ar (isGrounded false)", () => {
     const { engine } = makeFakeEngine();
     const p = createPlayer(engine, { pos: { x: 0, y: 0 }, maxHp: 100 });
-    p.isGrounded.mockReturnValue(false);
+    (p.isGrounded as ReturnType<typeof vi.fn>).mockReturnValue(false);
     p.jumpPlayer();
     expect(p.jump).not.toHaveBeenCalled();
   });

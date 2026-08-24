@@ -58,6 +58,38 @@ export interface NetBuyReceipt {
   stats: NetShopStats;
 }
 
+/** Moeda ativa da fase no broadcast do servidor (posição top-left em px). */
+export interface NetCoin {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Moeda removida (coletada) em um update — id + posição para efeitos. */
+export interface NetCoinRemoved {
+  id: string;
+  x: number;
+  y: number;
+}
+
+/** Contador da fase por jogador (chave = id do jogador). */
+export type NetCoinCounts = Record<string, number>;
+
+/**
+ * Atualização de moedas recebida do servidor:
+ * - broadcast `coins` (CoinsMsg): estado restante + remoções deste update +
+ *   contadores por jogador;
+ * - broadcast `players` (WorldMsg): estado completo + contadores (remoções
+ *   sempre vazias — a reconciliação via estado completo cobre as coletas).
+ */
+export interface NetCoinUpdate {
+  coins: NetCoin[];
+  removed: NetCoinRemoved[];
+  counts: NetCoinCounts;
+}
+
 export interface NetOpts {
   url: string;
   player: GameObj<any>;
@@ -66,6 +98,8 @@ export interface NetOpts {
   onPlayerLeave: (id: string) => void;
   /** Broadcast de fase: abre a loja (shop), atualiza prontos ou inicia o próximo mapa (playing). */
   onPhase?: (state: NetPhaseState) => void;
+  /** Atualização de moedas (estado + remoções + contadores por jogador). */
+  onCoins?: (update: NetCoinUpdate) => void;
   /** Resposta individual de shop_buy: comprovante (ok) ou erro. */
   onShopBuyResult?: (rc: NetBuyReceipt | { ok: false; error: string }) => void;
   /** Erro individual de shop_ready (fora da loja, jogador desconhecido). */
@@ -114,6 +148,17 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
           opts.onPlayerLeave(msg.id);
         } else if (msg.type === "players") {
           opts.onPlayers(msg.players ?? []);
+          // WorldMsg: o broadcast periódico carrega o estado completo das
+          // moedas (coins) e os contadores da fase (coinCounts). Só dispara
+          // quando o servidor envia os campos (compatibilidade com versões
+          // antigas que broadcastam apenas players).
+          if (Array.isArray(msg.coins) || msg.coinCounts !== undefined) {
+            opts.onCoins?.({
+              coins: msg.coins ?? [],
+              removed: [],
+              counts: msg.coinCounts ?? {},
+            });
+          }
           // WorldMsg: o campo `boss` carrega o estado do boss da fase (fases
           // múltiplas de 5) — null sem boss (o client esconde). Só dispara
           // quando o servidor envia o campo (compatibilidade com versões
@@ -121,6 +166,14 @@ export function connectToServer(k: KAPLAYCtx, opts: NetOpts) {
           if ("boss" in msg) {
             opts.onBoss?.(msg.boss ?? null);
           }
+        } else if (msg.type === "coins") {
+          // CoinsMsg: atualização de moedas — estado restante, remoções deste
+          // update (coletadas) e contadores por jogador da fase.
+          opts.onCoins?.({
+            coins: msg.coins ?? [],
+            removed: msg.removed ?? [],
+            counts: msg.counts ?? {},
+          });
         } else if (msg.type === "phase") {
           opts.onPhase?.({
             phase: msg.phase === "shop" ? "shop" : "playing",

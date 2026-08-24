@@ -137,6 +137,104 @@ describe("connectToServer — broadcast de fase (loja)", () => {
   });
 });
 
+// ===== Mensagens de moedas (CoinsMsg / WorldMsg) =====
+
+describe("connectToServer — lista de jogadores (welcome/players)", () => {
+  it("welcome entrega os jogadores com id (filtro do próprio jogador é do main.ts)", () => {
+    const onPlayers = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPlayers });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "welcome",
+        id: "self",
+        players: [{ id: "alice", x: 10, y: 20, hp: 100 }],
+      }),
+    });
+    expect(onPlayers).toHaveBeenCalledWith([{ id: "alice", x: 10, y: 20, hp: 100 }]);
+  });
+
+  it("WorldMsg players entrega a lista com id (coinCounts casa por id)", () => {
+    const onPlayers = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onPlayers });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "players",
+        players: [
+          { id: "alice", x: 10, y: 20, hp: 90 },
+          { id: "bob", x: 30, y: 40, hp: 100 },
+        ],
+      }),
+    });
+    expect(onPlayers).toHaveBeenCalledWith([
+      { id: "alice", x: 10, y: 20, hp: 90 },
+      { id: "bob", x: 30, y: 40, hp: 100 },
+    ]);
+  });
+});
+
+describe("connectToServer — broadcast de moedas", () => {
+  it("msg type=coins entrega estado restante, remoções e contadores", () => {
+    const onCoins = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onCoins });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "coins",
+        coins: [{ id: "c2", x: 300, y: 400, w: 14, h: 14 }],
+        removed: [{ id: "c1", x: 100, y: 200 }],
+        counts: { alice: 1 },
+      }),
+    });
+    expect(onCoins).toHaveBeenCalledWith({
+      coins: [{ id: "c2", x: 300, y: 400, w: 14, h: 14 }],
+      removed: [{ id: "c1", x: 100, y: 200 }],
+      counts: { alice: 1 },
+    });
+  });
+
+  it("msg type=coins sem campos opcionais usa defaults seguros", () => {
+    const onCoins = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onCoins });
+    captureWs([]).onmessage?.({ data: JSON.stringify({ type: "coins" }) });
+    expect(onCoins).toHaveBeenCalledWith({ coins: [], removed: [], counts: {} });
+  });
+
+  it("WorldMsg (type=players) com coins+coinCounts entrega estado completo e contadores", () => {
+    const onCoins = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onCoins });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({
+        type: "players",
+        players: [{ id: "alice", x: 10, y: 20, hp: 100 }],
+        coins: [{ id: "c1", x: 100, y: 200, w: 14, h: 14 }],
+        coinCounts: { alice: 3 },
+      }),
+    });
+    expect(onCoins).toHaveBeenCalledWith({
+      coins: [{ id: "c1", x: 100, y: 200, w: 14, h: 14 }],
+      removed: [],
+      counts: { alice: 3 },
+    });
+  });
+
+  it("WorldMsg com coins mas sem coinCounts usa contadores vazios", () => {
+    const onCoins = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onCoins });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "players", players: [], coins: [] }),
+    });
+    expect(onCoins).toHaveBeenCalledWith({ coins: [], removed: [], counts: {} });
+  });
+
+  it("broadcast players SEM campos de moeda (servidor antigo) não dispara onCoins", () => {
+    const onCoins = vi.fn();
+    connectToServer(makeK() as any, { ...makeOpts("/api/ws"), onCoins });
+    captureWs([]).onmessage?.({
+      data: JSON.stringify({ type: "players", players: [{ id: "alice", x: 1, y: 2, hp: 100 }] }),
+    });
+    expect(onCoins).not.toHaveBeenCalled();
+  });
+});
+
 describe("connectToServer — resposta de compra (shop_buy_result)", () => {
   it("ok=true entrega o comprovante com stats e saldo", () => {
     const onShopBuyResult = vi.fn();

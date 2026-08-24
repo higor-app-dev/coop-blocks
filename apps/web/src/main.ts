@@ -8,7 +8,8 @@ import {
   type EnemyShot,
 } from "./enemies";
 import { generateLevel, isLevelFinished, TILE, mulberry32, type LevelData } from "./levelgen";
-import { connectToServer, type NetPhaseState, type NetPlayer } from "./net";
+import { connectToServer, type NetCoin, type NetPhaseState, type NetPlayer } from "./net";
+import { createCoinLayer, levelCoin } from "./coins";
 import { createInput } from "./input";
 import { computeButtonSpecs } from "./touch-buttons";
 import {
@@ -115,7 +116,9 @@ const MAX_HP = 100;
 // Tags dos objetos que pertencem ao MUNDO (mapa atual) e são destruídos na
 // transição de fase — o player é reutilizado entre mapas, não entra aqui.
 // "hostile" são os projéteis do atirador (IA local), limpos junto do mundo.
-const WORLD_TAGS = ["solid", "coin", "enemy", "hostile"];
+// Moedas NÃO estão na lista: o ciclo de vida delas pertence à coinLayer
+// (única criadora/destruidora), que o buildWorld limpa via clear().
+const WORLD_TAGS = ["solid", "enemy", "hostile"];
 
 // ===== Áudio + partículas =====
 // Mute aplicado IMEDIATAMENTE (master gain nasce no estado correto mesmo
@@ -127,6 +130,26 @@ setMuted(loadMutedSession());
 const particles = createParticles(
   { ...k, randInt: k.randi } as unknown as Parameters<typeof createParticles>[0]
 );
+
+// ===== Moedas =====
+// A coinLayer é a ÚNICA criadora/destruidora de moedas renderizadas (tag
+// "coin"): no multiplayer ela espelha o estado autoritativo do servidor
+// (broadcast coins/removed/counts); no singleplayer local ela recebe a
+// geração da fase e os drops de inimigos via applyFull/addCoins. O efeito de
+// coleta (som + partículas) é disparado quando o servidor broadcasta uma
+// remoção — o client reage ao evento mesmo sem ter coletado localmente.
+const coinLayer = createCoinLayer(k, {
+  onCollect: (c) => {
+    playCoin();
+    particles.spawnCoinCollect(c.x, c.y);
+  },
+});
+// true = moedas autoritativas do servidor (primeiro broadcast recebido).
+// Enquanto false (offline/sem servidor ainda), a fase gera moedas locais.
+let serverCoins = false;
+// Contadores da fase por jogador (broadcast do servidor) — alimentam os
+// badges de moedas do HUD no multiplayer.
+let coinCounts: Record<string, number> = {};
 
 // ===== HUD =====
 // Overlay criado uma única vez; o estado completo do jogo é passado a cada
@@ -188,10 +211,11 @@ let playerMaxHp = MAX_HP;
 let level: LevelData;
 
 function buildWorld(number: number, maxHp: number): void {
-  // Destrói o mundo anterior (tiles/moedas/inimigos); o player sobrevive.
+  // Destrói o mundo anterior (tiles/inimigos/moedas); o player sobrevive.
   for (const tag of WORLD_TAGS) {
     destroyAll(tag);
   }
+  coinLayer.clear();
   teamCoins = 0;
 
   level = generateLevel(k, {
@@ -202,20 +226,20 @@ function buildWorld(number: number, maxHp: number): void {
   });
   level.render();
 
-  // Moedas (coleta): fileira sobre o chão (toda 4ª coluna sólida). Topo do
-  // chão = tile mais baixo do grid menos 1 (o chão tem 2 fileiras).
-  const groundRow = Math.max(...level.tiles.map((t) => t.y)) - 1;
-  for (const t of level.tiles) {
-    if (t.y === groundRow && t.x >= 6 && t.x % 4 === 0) {
-      add([
-        "coin",
-        pos(t.x * TILE + TILE / 2, t.y * TILE - 30),
-        rect(14, 14),
-        color(255, 215, 60),
-        area(),
-        z(3),
-      ]);
+  // Moedas da fase — singleplayer local (offline): espelho do servidor
+  // (Level.CoinSpawns — fileira do chão: x>=6, x%4==0) com a MESMA conversão
+  // tile→px (levelCoin: centro da coluna, flutuando 30px, top-left da hitbox
+  // 14x14). No multiplayer o primeiro broadcast de moedas assume a autoridade
+  // (serverCoins=true) e estas locais são descartadas pela coinLayer.clear().
+  if (!serverCoins) {
+    const groundRow = Math.max(...level.tiles.map((t) => t.y)) - 1;
+    const localCoins: NetCoin[] = [];
+    for (const t of level.tiles) {
+      if (t.y === groundRow && t.x >= 6 && t.x % 4 === 0) {
+        localCoins.push(levelCoin(t.x, t.y, `c${localCoins.length + 1}`));
+      }
     }
+    coinLayer.applyFull(localCoins);
   }
 
   // Inimigos (IA 100% local, singleplayer offline): um por spawn do levelgen,
@@ -299,11 +323,16 @@ const shop = createShop({
 
 // ===== Colisões =====
 
-// player × coin — coleta com som + partículas.
+// player × coin — coleta. No multiplayer o servidor é autoritativo: detecta
+// a sobreposição (AABB) e broadcasta `removed` + counts — a coinLayer remove
+// na hora e o onCollect toca som/partículas; nada é feito localmente. No
+// singleplayer local a coleta é imediata: som + partículas + contador do time.
 onCollide("player", "coin", (pl, c) => {
+  if (serverCoins) return;
   playCoin();
   particles.spawnCoinCollect(c.pos.x, c.pos.y);
-  destroy(c);
+  const id = (c as unknown as { coinId?: string }).coinId;
+  if (id) coinLayer.remove(id);
   teamCoins += 1;
 });
 
@@ -366,20 +395,26 @@ onCollide("bullet", "enemy", (b, en) => {
 });
 
 // Drop de moedas na destruição do inimigo (1–3, faixa do servidor): moedas
-// estáticas espalhadas ao redor do ponto de morte — a coleta reusa a colisão
-// player × coin (som + partículas + contador do HUD).
+// estáticas espalhadas ao redor do ponto de morte. Apenas no singleplayer
+// local — no multiplayer as moedas são autoritativas do servidor (ele mesmo
+// droparia as moedas na destruição dos inimigos da simulação dele; um drop
+// local seria uma moeda fantasma que o próximo broadcast removeria).
+let dropSeq = 0;
 function dropCoins(x: number, y: number): void {
+  if (serverCoins) return;
   const count = Math.floor(rand(ENEMY_MIN_COIN_DROP, ENEMY_MAX_COIN_DROP + 1));
+  const drops: NetCoin[] = [];
   for (let i = 0; i < count; i++) {
-    add([
-      "coin",
-      pos(x + (i - (count - 1) / 2) * 16, y - 6),
-      rect(14, 14),
-      color(255, 215, 60),
-      area(),
-      z(3),
-    ]);
+    dropSeq += 1;
+    drops.push({
+      id: `d${dropSeq}`,
+      x: x + (i - (count - 1) / 2) * 16,
+      y: y - 6,
+      w: 14,
+      h: 14,
+    });
   }
+  coinLayer.addCoins(drops);
 }
 
 // ===== Projéteis hostis (atirador, IA local) =====
@@ -443,7 +478,10 @@ const server = connectToServer(k, {
   onPlayers: (list) => {
     netPlayers.length = 0;
     for (const np of list) {
-      if (np.id === server.myId()) continue;
+      // PlayerState não carrega id no wire — o welcome inclui o PRÓPRIO
+      // jogador sem id; pular entradas sem id evita linha fantasma
+      // ("Jogador" com id undefined) no painel do HUD.
+      if (!np.id || np.id === server.myId()) continue;
       netPlayers.push(np);
     }
   },
@@ -475,6 +513,21 @@ const server = connectToServer(k, {
       currentLevelNumber = state.number;
       buildWorld(state.number, mine?.stats.maxHp ?? playerMaxHp);
     }
+  },
+  // Moedas do servidor (estado completo + remoções + contadores por jogador):
+  // o primeiro broadcast assume a autoridade — as moedas locais da fase
+  // inicial (geradas antes da conexão) são descartadas e a renderização passa
+  // a espelhar exatamente o que o servidor manda. Remoções são aplicadas
+  // ANTES do estado completo para o efeito de coleta não se perder quando a
+  // moeda coletada já saiu do estado restante no mesmo broadcast.
+  onCoins: ({ coins, removed, counts }) => {
+    if (!serverCoins) {
+      serverCoins = true;
+      coinLayer.clear();
+    }
+    if (removed.length > 0) coinLayer.applyRemoved(removed);
+    coinLayer.applyFull(coins);
+    coinCounts = counts;
   },
   // Resposta individual de compra: comprovante atualiza a tela na hora;
   // erro (moedas insuficientes, nível máximo) aparece na loja.
@@ -580,6 +633,10 @@ function buildHudState(): HudState {
       y: player.pos.y,
       respawning: localDead,
       respawnIn: localDead ? Math.max(0, 3 - (now - localDeadSince) / 1000) : undefined,
+      // Badge de moedas do jogador local (multiplayer): contador DA FASE
+      // vindo do broadcast do servidor. Offline o contador é o teamCoins
+      // (canto superior direito) — sem badge aqui.
+      coins: serverCoins ? (coinCounts[server.myId()] ?? 0) : undefined,
     });
   }
   for (const np of netPlayers) {
@@ -591,10 +648,11 @@ function buildHudState(): HudState {
       maxHp: MAX_HP,
       x: np.x,
       y: np.y,
+      coins: serverCoins ? (coinCounts[np.id] ?? 0) : undefined,
     });
   }
 
-    // Boss da fase (fases múltiplas de 5): a barra do HUD aparece quando o
+  // Boss da fase (fases múltiplas de 5): a barra do HUD aparece quando o
     // servidor broadcasta um boss ativo e some quando ele é derrotado
     // (broadcast null → hp()/maxHp() voltam a null → boss undefined). O
     // estado/phase alimentam o rótulo e a cor da barra. hp/maxHp são lidos
@@ -613,7 +671,10 @@ function buildHudState(): HudState {
       players,
       localPlayerId: server.myId() || "local",
       camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
-      teamCoins,
+      // Multiplayer: total exibido = contador DA FASE do jogador local
+      // (servidor é autoritativo; não existe carteira de time). Offline: o
+      // contador local do singleplayer.
+      teamCoins: serverCoins ? (coinCounts[server.myId()] ?? 0) : teamCoins,
       // Sem servidor (singleplayer local offline), a fase exibida é a local
       // (currentLevelNumber) — o broadcast da run é quem manda no multiplayer.
       phase: phaseState ? `Fase ${phaseState.number}` : `Fase ${currentLevelNumber}`,

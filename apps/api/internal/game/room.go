@@ -21,6 +21,9 @@ var (
 // broadcast. X/Y são pixels (top-left do hitbox); VX/VY são velocidades em
 // px/s; Grounded/Facing vêm da física do servidor (player.go).
 type PlayerState struct {
+	// ID identifica o jogador no wire (welcome/WorldMsg) — o client usa para
+	// filtrar o próprio jogador e casar contadores por jogador (coinCounts).
+	ID       string  `json:"id"`
 	X        int     `json:"x"`
 	Y        int     `json:"y"`
 	VX       float64 `json:"vx"`
@@ -180,7 +183,9 @@ func (r *Room) Snapshot() []PlayerState {
 	defer r.mu.RUnlock()
 	out := make([]PlayerState, 0, len(r.players))
 	for _, p := range r.players {
-		out = append(out, p.PlayerState)
+		st := p.PlayerState
+		st.ID = p.ID // o ID vive no Player; o wire (welcome/WorldMsg) o carrega
+		out = append(out, st)
 	}
 	return out
 }

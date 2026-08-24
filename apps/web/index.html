@@ -34,25 +34,64 @@
         display: block;
         touch-action: none;
       }
-      #hud {
+      /* Overlay do HUD (criado por apps/web/src/hud.ts) */
+      .hud-root {
         position: fixed;
-        /* max() + env() respeita o notch em aparelhos com viewport-fit=cover */
+        inset: 0;
+        z-index: 20;
+        pointer-events: none;
+        color: #fff;
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .hud-root > div {
+        position: absolute;
+        padding: 4px 10px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        white-space: nowrap;
+      }
+      /* Fase/mapa — canto superior esquerdo */
+      .hud-root .hud-phase {
+        top: max(8px, env(safe-area-inset-top));
+        left: max(8px, env(safe-area-inset-left));
+      }
+      /* Moedas da equipe — canto superior direito */
+      .hud-root .hud-coins {
+        top: max(8px, env(safe-area-inset-top));
+        right: max(8px, env(safe-area-inset-right));
+      }
+      /* Mensagem de status — centro superior */
+      .hud-root .hud-status {
         top: max(8px, env(safe-area-inset-top));
         left: 50%;
         transform: translateX(-50%);
-        color: #fff;
-        background: rgba(0, 0, 0, 0.55);
-        padding: 4px 14px;
         border-radius: 999px;
         font-size: 13px;
-        z-index: 10;
-        pointer-events: none;
+      }
+      /* Painel de HP dos jogadores — canto inferior esquerdo (preenchido pelo
+         subtask de placar) */
+      .hud-root .hud-players {
+        bottom: max(8px, env(safe-area-inset-bottom));
+        left: max(8px, env(safe-area-inset-left));
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        background: none;
+        padding: 0;
+      }
+      /* Camada de setas de direção (preenchida pelo subtask de setas) */
+      .hud-root .hud-arrows {
+        inset: 0;
+        background: none;
+        padding: 0;
       }
     </style>
   </head>
   <body>
     <div id="app"></div>
-    <div id="hud">🧱 coop-blocks — conectando ao servidor…</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { formatDeathMessage, formatHud } from "./hud";
+import { clampHp, formatDeathMessage, formatHud } from "./hud";
+
+describe("clampHp", () => {
+  it("mantém valores dentro da faixa", () => {
+    expect(clampHp(100, 100)).toBe(100);
+    expect(clampHp(42, 100)).toBe(42);
+    expect(clampHp(0, 100)).toBe(0);
+  });
+
+  it("clampa abaixo de 0", () => {
+    expect(clampHp(-5, 100)).toBe(0);
+    expect(clampHp(-100, 100)).toBe(0);
+  });
+
+  it("clampa acima do maxHp", () => {
+    expect(clampHp(150, 100)).toBe(100);
+    expect(clampHp(101, 100)).toBe(100);
+  });
+});
 
 describe("formatHud", () => {
   it("formata o caso normal", () => {

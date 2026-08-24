@@ -4,7 +4,12 @@ import { spawnEnemy } from "./enemies";
 import { generateLevel } from "./levelgen";
 import { connectToServer, type NetPlayer } from "./net";
 import { ACTION_KEYS, keyToAction } from "./input";
-import { formatDeathMessage, formatHud } from "./hud";
+import {
+  createHud,
+  formatDeathMessage,
+  type HudPlayer,
+  type HudState,
+} from "./hud";
 
 // ===== Configuração do jogo =====
 // Canvas dentro do container #app (100% da viewport). letterbox mantém a
@@ -66,10 +71,10 @@ const {
 const MAX_HP = 100;
 
 // ===== HUD =====
-const hudEl = document.getElementById("hud")!;
-function updateHud(hp: number, netCount: number) {
-  hudEl.textContent = formatHud(hp, MAX_HP, netCount);
-}
+// Overlay criado uma única vez; o estado completo do jogo é passado a cada
+// frame no onUpdate (seção "Câmera + HUD" abaixo).
+const hud = createHud();
+let localDead = false;
 
 // ===== Fase gerada automaticamente =====
 const level = generateLevel(k, { width: 120, height: 12, seed: Date.now() });
@@ -79,10 +84,9 @@ level.render();
 const player = createPlayer(k, {
   pos: level.playerSpawn,
   maxHp: MAX_HP,
-  onHpChange: (hp) => updateHud(hp, netPlayers.length),
 });
 player.onDestroy(() => {
-  hudEl.textContent = formatDeathMessage();
+  localDead = true;
 });
 
 // ===== Inimigos (base) =====
@@ -93,7 +97,6 @@ for (const p of level.enemySpawns) {
     onCollide("player", "enemy", (pl, en) => {
       if (pl.hp > 0) {
         pl.hp -= en.damage;
-        updateHud(pl.hp, netPlayers.length);
         if (pl.hp <= 0) {
           pl.trigger("death");
           destroy(pl);
@@ -115,19 +118,16 @@ const server = connectToServer(k, {
       if (np.id === server.myId()) continue;
       netPlayers.push(np);
     }
-    updateHud(player.hp, netPlayers.length);
   },
   onPlayerJoin: (np) => {
     if (np.id !== server.myId() && !netPlayers.find((p) => p.id === np.id)) {
       netPlayers.push(np);
-      updateHud(player.hp, netPlayers.length);
     }
   },
   onPlayerLeave: (id) => {
     const i = netPlayers.findIndex((p) => p.id === id);
     if (i >= 0) {
       netPlayers.splice(i, 1);
-      updateHud(player.hp, netPlayers.length);
     }
   },
 });
@@ -145,7 +145,46 @@ for (const key of ACTION_KEYS) {
   });
 }
 
-// ===== Câmera segue o jogador =====
+// ===== Câmera segue o jogador + HUD a cada frame =====
+// O estado do HUD é montado do estado real do jogo e passado para o módulo
+// hud.ts, que renderiza o overlay. O servidor ainda não envia nome/cor/moedas/
+// fase — os campos opcionais ficam ocultos até esses dados existirem.
+function buildHudState(): HudState {
+  const players: HudPlayer[] = [];
+  const cam = k.getCamPos();
+
+  if (player.exists()) {
+    players.push({
+      id: server.myId() || "local",
+      name: "Você",
+      color: "rgb(66, 200, 245)",
+      hp: player.hp,
+      maxHp: MAX_HP,
+      x: player.pos.x,
+      y: player.pos.y,
+    });
+  }
+  for (const np of netPlayers) {
+    players.push({
+      id: np.id,
+      name: "Jogador",
+      color: "rgb(200, 200, 200)",
+      hp: np.hp,
+      maxHp: MAX_HP,
+      x: np.x,
+      y: np.y,
+    });
+  }
+
+  return {
+    players,
+    localPlayerId: server.myId() || "local",
+    camera: { x: cam.x, y: cam.y, width: k.width(), height: k.height() },
+    status: localDead ? formatDeathMessage() : undefined,
+  };
+}
+
 onUpdate(() => {
-  if (player.exists()) k.camPos(vec2(player.pos.x, 360));
+  if (player.exists()) k.setCamPos(vec2(player.pos.x, 360));
+  hud.update(buildHudState());
 });

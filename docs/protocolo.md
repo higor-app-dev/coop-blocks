@@ -304,7 +304,49 @@ Passos mínimos para um cliente válido:
 3. Enviar `state` continuamente (x, y, hp atuais).
 4. Renderizar `welcome.players` e `players` como lista substituível; remover por `id` em `player_leave`.
 
-## 6. Referências no código
+## 6. Arquitetura-alvo (planejada)
+
+A arquitetura **alvo** do projeto (descrita no README como "Planejado") muda o papel do
+servidor de *relay de estado* para **servidor autoritativo**. Nada nesta seção está
+implementado no código atual — é o desenho de referência para a evolução do protocolo e
+das regras do jogo.
+
+### 6.1 Servidor autoritativo
+
+- O servidor passa a **simular o jogo** (física, colisões, HP, moedas, inimigos) e os
+  clientes enviam **intenções de entrada** (andar, pular, atirar) em vez da posição final.
+- O servidor valida movimento e aplica dano/coleta; o cliente apenas renderiza o estado
+  recebido e não decide o resultado de colisões.
+- Consequência para o protocolo: o tipo `state` (cliente → servidor) seria substituído por
+  uma mensagem de **ação/input**, e o servidor passaria a emitir o estado consolidado do
+  mundo no broadcast.
+
+### 6.2 Tick fixo de 20 tps
+
+- Loop de simulação determinístico no servidor com **50 ms por tick (20 ticks/s)**.
+- A cada tick o servidor: processa inputs, avança a simulação, aplica dano/coleta e emite
+  o snapshot do mundo.
+- Hoje o broadcast é de **~10 Hz** (ticker de 100 ms) apenas ecoando `state` do cliente —
+  sem simulação.
+
+### 6.3 Seed compartilhada de fase
+
+- A geração procedural da fase recebe uma **seed única**, gerada pelo servidor e enviada
+  aos clientes (ex.: no `welcome`), para que **todos vejam a mesma fase**.
+- Hoje cada cliente gera a fase com `seed: Date.now()` local
+  (`apps/web/src/main.ts` → `generateLevel`), então cada jogador vê uma fase diferente.
+- O `LevelSpec` em `apps/web/src/levelgen.ts` já carrega `seed` no contrato; falta o
+  servidor distribuir a seed e o client consumi-la.
+
+### 6.4 Itens planejados derivados
+
+- **Morte/respawn** — mensagem de morte e respawn coordenado pelo servidor (hoje é
+  client-side: o HUD pede para recarregar a página).
+- **Moedas** — coleta e economia de moedas por fase.
+- **Loja** — gastar moedas em upgrades entre fases.
+- **Squad wipe** — condição de derrota quando o time inteiro morre.
+
+## 7. Referências no código
 
 | Arquivo | Conteúdo |
 |---------|----------|

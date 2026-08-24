@@ -96,6 +96,16 @@ func newGameServer() http.Handler {
 	coins := game.NewCoinManagerDefault()
 	coins.SpawnForLevel(&level)
 
+	// Power-ups da fase: coletáveis RAROS (1-3 por fase, no máximo um de cada
+	// tipo, posições determinísticas da seed — Level.PowerUpSpawns) com dono
+	// autoritativo do estado (entidades + efeitos ativos por jogador). Mesma
+	// trilha das moedas: SpawnForLevel no início da fase, Step no loop, Reset
+	// no avanço. Efeitos aplicados aqui embaixo: VIDA eleva o HP acima do
+	// teto no Sim (temporário), TIRO TRIPLO dura 10 s (3 projéteis por
+	// disparo) e ESCUDO absorve 1 hit.
+	powerups := game.NewPowerUpManagerDefault()
+	powerups.SpawnForLevel(&level)
+
 	// Simulação de HP/moedas/respawn: aplica dano de contato e de projétil
 	// hostil. A carteira persistente (Sim.Coins) é o saldo da run que a loja
 	// gasta — os drops de inimigos viram moedas coletáveis na fase (CoinManager),
@@ -118,9 +128,16 @@ func newGameServer() http.Handler {
 	// Aplica dano e reage à morte: zera o contador de moedas DA FASE do
 	// jogador (morte no mapa atual) e broadcasta as contagens. A carteira
 	// persistente/gasta (sim.Coins) não é tocada pela morte. Escudo ativo
-	// absorve o hit inteiro (consome a carga, nenhum dano aplicado).
+	// absorve o hit inteiro (consome a carga, nenhum dano aplicado) — escudo
+	// da loja (upgrade) primeiro, escudo de power-up em seguida. Na morte,
+	// TODOS os efeitos de power-up do jogador somem (efeito morre junto com o
+	// player) e o estado dos efeitos é rebroadcastado para o HUD.
 	applyDamage := func(id string, dmg int) {
 		if shop.AbsorbShield(id) {
+			hub.Broadcast(game.ShieldAbsorbedMsg(id))
+			return
+		}
+		if powerups.ConsumeShield(id) {
 			hub.Broadcast(game.ShieldAbsorbedMsg(id))
 			return
 		}
@@ -131,8 +148,10 @@ func newGameServer() http.Handler {
 		}
 		for _, ev := range evs {
 			if ev.Type == game.EventDeath {
+				powerups.ClearPlayer(ev.PlayerID)
 				coins.ResetPlayer(ev.PlayerID)
 				hub.Broadcast(game.CoinsMsg(coins.Snapshot(), nil, coins.Counts()))
+				hub.Broadcast(game.PowerUpsMsg(powerups.Snapshot(), nil, powerups.EffectsSnapshot()))
 			}
 		}
 	}
@@ -181,6 +200,8 @@ func newGameServer() http.Handler {
 		boss.SpawnForLevel(&level)
 		coins.Reset()
 		coins.SpawnForLevel(&level)
+		powerups.Reset()
+		powerups.SpawnForLevel(&level)
 		projectiles.Clear()
 		sim.ReviveAll()
 		hps := map[string]int{}
@@ -241,7 +262,14 @@ func newGameServer() http.Handler {
 			}
 			lastShot[c.ID()] = now
 			fireMu.Unlock()
+			// Tiro triplo (power-up): 3 projéteis paralelos com deslocamento
+			// vertical (lanes) enquanto o efeito estiver ativo — o servidor
+			// é autoritativo na cadência e na quantidade.
 			projectiles.Fire(c.ID(), float64(st.X), float64(st.Y), st.Facing)
+			if powerups.TripleShotActive(c.ID()) {
+				projectiles.Fire(c.ID(), float64(st.X), float64(st.Y)-6, st.Facing)
+				projectiles.Fire(c.ID(), float64(st.X), float64(st.Y)+6, st.Facing)
+			}
 		}
 	})
 
@@ -397,7 +425,35 @@ func newGameServer() http.Handler {
 					hub.Broadcast(game.CoinsMsg(coins.Snapshot(), removed, coins.Counts()))
 				}
 
-				// 5) Fim de fase: qualquer jogador que cruzou o fim do mapa
+				// 5) Power-ups: coleta por sobreposição (MESMA trilha das
+				//    moedas — Step remove + devolve o evento) e o efeito é
+				//    aplicado aqui, autoritativamente: VIDA eleva o HP acima do
+				//    teto no Sim (temporário — respawn/fim de fase restauram
+				//    MaxHP), TIRO TRIPLO registra a duração (10 s, expiração por
+				//    tick no manager) e ESCUDO concede 1 carga (absorve 1 hit no
+				//    applyDamage). Broadcast imediato com remoções + efeitos para
+				//    o client tocar a coleta e atualizar o HUD.
+				var removedPowerUps []game.PowerUpRemoved
+				for _, ev := range powerups.Step(players) {
+					if ev.Type == game.PowerUpEventCollected {
+						powerups.ApplyCollected(ev.PlayerID, ev.Kind)
+						if ev.Kind == game.PowerUpVida {
+							// Lê MaxHP e aplica sob o mesmo lock do Sim (sem
+							// janela de corrida com upgrades de max_hp da loja).
+							if err := sim.BoostHPAboveMax(ev.PlayerID, game.PowerUpVidaBonus); err != nil {
+								log.Printf("power-up vida %s: %v", ev.PlayerID, err)
+							}
+						}
+						removedPowerUps = append(removedPowerUps, game.PowerUpRemoved{
+							ID: ev.PowerUpID, Kind: ev.Kind.String(), X: int(ev.X), Y: int(ev.Y),
+						})
+					}
+				}
+				if len(removedPowerUps) > 0 {
+					hub.Broadcast(game.PowerUpsMsg(powerups.Snapshot(), removedPowerUps, powerups.EffectsSnapshot()))
+				}
+
+				// 6) Fim de fase: qualquer jogador que cruzou o fim do mapa
 				//    fecha a fase e abre a loja — todos precisam confirmar
 				//    'pronto' antes do próximo mapa (EnterShop é idempotente;
 				//    o Run não deixa re-disparar).
@@ -414,7 +470,7 @@ func newGameServer() http.Handler {
 			}
 
 			if tick%2 == 0 {
-				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot(), coins.Snapshot(), coins.Counts(), boss.Snapshot()))
+				hub.Broadcast(game.WorldMsg(room.Snapshot(), projectiles.Snapshot(), enemies.Snapshot(), coins.Snapshot(), coins.Counts(), powerups.Snapshot(), powerups.EffectsSnapshot(), boss.Snapshot()))
 			}
 		}
 	}()

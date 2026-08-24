@@ -621,3 +621,44 @@ func TestSimReviveAllNaoAlteraTetoJaElevado(t *testing.T) {
 		t.Errorf("carol = %+v, want MaxHP 150 com HP cheio", carol)
 	}
 }
+
+// TestSimBoostHP permite HP ACIMA do teto — efeito do power-up VIDA (+25
+// acima do máximo): só sobe (nunca regride), o teto base (MaxHP) não muda e
+// respawn/ReviveAll restauram HP=MaxHP (o excedente é temporário por
+// construção). Jogador desconhecido devolve erro.
+func TestSimBoostHP(t *testing.T) {
+	s := NewSimDefault(newScriptedRNG())
+	s.AddPlayer("alice")
+
+	// HP acima do teto: 100 -> 125 (teto temporário do power-up VIDA).
+	if err := s.BoostHPAboveMax("alice", PowerUpVidaBonus); err != nil {
+		t.Fatalf("BoostHPAboveMax(+25): %v", err)
+	}
+	if p := simID(s, "alice"); p.HP != 125 || p.MaxHP != DefaultMaxHP {
+		t.Errorf("alice = %+v, want HP 125 acima do teto %d", p, DefaultMaxHP)
+	}
+
+	// Só sobe: bônus menor que o HP atual não regride.
+	if err := s.BoostHPAboveMax("alice", 10); err != nil {
+		t.Fatalf("BoostHPAboveMax(+10): %v", err)
+	}
+	if p := simID(s, "alice"); p.HP != 125 {
+		t.Errorf("HP = %d, want 125 (BoostHPAboveMax nunca regride)", p.HP)
+	}
+
+	// Respawn restaura o teto base: o excedente do power-up morre junto.
+	if _, err := s.ApplyDamage("alice", 200); err != nil {
+		t.Fatalf("ApplyDamage: %v", err)
+	}
+	for i := 0; i < DefaultRespawnTicks; i++ {
+		s.Tick()
+	}
+	if p := simID(s, "alice"); p.HP != DefaultMaxHP {
+		t.Errorf("após respawn HP = %d, want %d (excedente temporário)", p.HP, DefaultMaxHP)
+	}
+
+	// Jogador desconhecido.
+	if err := s.BoostHPAboveMax("fantasma", 50); err != ErrPlayerNotFound {
+		t.Errorf("BoostHPAboveMax(fantasma) = %v, want ErrPlayerNotFound", err)
+	}
+}

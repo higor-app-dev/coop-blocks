@@ -500,7 +500,7 @@ func TestWorldMsgCarregaMoedas(t *testing.T) {
 	coins := []CoinState{{ID: "c1", X: 10, Y: 20, W: 14, H: 14}}
 	counts := map[string]int{"alice": 2}
 
-	msg := WorldMsg(nil, nil, nil, coins, counts)
+	msg := WorldMsg(nil, nil, nil, coins, counts, nil, nil)
 	if got := msg["coins"].([]CoinState); len(got) != 1 || got[0].ID != "c1" {
 		t.Errorf("coins = %+v, want [c1]", got)
 	}
@@ -513,7 +513,7 @@ func TestWorldMsgCarregaMoedas(t *testing.T) {
 	}
 
 	// coinCounts nil → objeto vazio (nunca null)
-	msgNil := WorldMsg(nil, nil, nil, nil, nil)
+	msgNil := WorldMsg(nil, nil, nil, nil, nil, nil, nil)
 	if got := msgNil["coinCounts"].(map[string]int); len(got) != 0 {
 		t.Errorf("coinCounts nil = %+v, want vazio", got)
 	}

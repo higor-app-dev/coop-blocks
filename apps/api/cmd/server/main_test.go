@@ -399,6 +399,61 @@ func (c *e2eClient) coletaMoeda(coin wireCoin) {
 	c.t.Fatalf("timeout coletando moeda %s (%d,%d): contador %d", coin.ID, coin.X, coin.Y, c.coletadas)
 }
 
+// ---- power-ups (broadcast powerups + campo do mundo) ----
+
+type wirePowerUp struct {
+	ID, Kind string
+	X, Y     int
+}
+
+// powerUpsDoMundo devolve a lista de power-ups de um broadcast do mundo
+// (recém-conectado; chamar drena() antes para não pegar estado velho).
+func (c *e2eClient) powerUpsDoMundo() []wirePowerUp {
+	c.t.Helper()
+	m := c.espera(func(m map[string]any) bool {
+		ps, _ := m["powerUps"].([]any)
+		return m["type"] == "players" && len(ps) > 0
+	}, 5*time.Second)
+	ps, _ := m["powerUps"].([]any)
+	out := make([]wirePowerUp, 0, len(ps))
+	for _, raw := range ps {
+		pm, _ := raw.(map[string]any)
+		out = append(out, wirePowerUp{
+			ID:   pm["id"].(string),
+			Kind: pm["kind"].(string),
+			X:    int(pm["x"].(float64)),
+			Y:    int(pm["y"].(float64)),
+		})
+	}
+	return out
+}
+
+// coletaPowerUp posiciona o jogador sobre o power-up (sobreposição AABB, sem
+// física — o servidor compara o X/Y reportado) e espera o broadcast powerups
+// confirmar a remoção + efeito ativo no HUD. Devolve o broadcast recebido.
+func (c *e2eClient) coletaPowerUp(pu wirePowerUp, timeout time.Duration) map[string]any {
+	c.t.Helper()
+	c.estado(pu.X-5, pu.Y-5, 100, 1)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case m := <-c.msgs:
+			if m["type"] != "powerups" {
+				continue
+			}
+			removed, _ := m["removed"].([]any)
+			for _, raw := range removed {
+				if r, _ := raw.(map[string]any); r["id"] == pu.ID {
+					return m
+				}
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	c.t.Fatalf("timeout coletando power-up %s (%s @%d,%d)", pu.ID, pu.Kind, pu.X, pu.Y)
+	return nil
+}
+
 // coletaFaseETermina faz a coleta da fase atual: alice coleta todas as moedas
 // coletáveis exceto uma (que fica para bob — prova de carteiras individuais),
 // depois chega ao fim do mapa e espera a loja abrir. Devolve o broadcast da
@@ -632,5 +687,90 @@ func TestFluxoLojaCompletoE2E(t *testing.T) {
 	// carteira de bob intacta ao fim (só a moeda dele por fase)
 	if got := moedasDe(f5, bob.id); got != 4 {
 		t.Errorf("bob na fase 5 = %d moedas, want 4 (intocado pelas compras de alice)", got)
+	}
+}
+
+// TestPowerUpsE2E cobre o caminho autoritativo dos power-ups no servidor
+// REAL (mesma fiação do binário): a fase 1 (seed 1) gera exatamente 2
+// power-ups (tiro_triplo e escudo) que chegam no broadcast do mundo; coletar
+// um deles (sobreposição reportada) remove o coletável, aplica o EFEITO
+// (tiro triplo com ticks restantes no HUD) e o broadcast powerups carrega a
+// remoção + o estado dos efeitos. O segundo (escudo) confirma o efeito de
+// carga no HUD. A verificação por seed/raridade fica nos testes de unidade
+// (level_test.go/powerups_test.go).
+func TestPowerUpsE2E(t *testing.T) {
+	srv := httptest.NewServer(newGameServer())
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/ws"
+
+	alice := dialE2E(t, wsURL)
+	defer alice.conn.Close()
+
+	alice.esperaWelcome(3 * time.Second)
+	alice.esperaFase(func(f faseWire) bool { return f.fase == "playing" }, 3*time.Second)
+
+	// ===== 1) Fase 1 (seed 1): power-ups no mundo, limitados e tipados =====
+	alice.drena()
+	pus := alice.powerUpsDoMundo()
+	if len(pus) == 0 || len(pus) > 3 {
+		t.Fatalf("fase 1 com %d power-ups, want 1..3 (raridade limitada)", len(pus))
+	}
+	kinds := map[string]int{}
+	for _, pu := range pus {
+		if pu.Kind != "vida" && pu.Kind != "tiro_triplo" && pu.Kind != "escudo" {
+			t.Errorf("power-up %s com tipo desconhecido %q", pu.ID, pu.Kind)
+		}
+		kinds[pu.Kind]++
+	}
+	if kinds["tiro_triplo"] != 1 || kinds["escudo"] != 1 {
+		t.Errorf("fase 1 (seed 1) deveria ter exatamente 1 tiro_triplo e 1 escudo, got %v", kinds)
+	}
+
+	// ===== 2) Coleta do tiro_triplo: removido + efeito ativo no HUD =====
+	var alvo wirePowerUp
+	for _, pu := range pus {
+		if pu.Kind == "tiro_triplo" && pu.X < e2eCoinSafeMaxX {
+			alvo = pu
+			break
+		}
+	}
+	if alvo.ID == "" {
+		t.Fatal("tiro_triplo da fase 1 não encontrado antes do fim do mapa")
+	}
+	m := alice.coletaPowerUp(alvo, 5*time.Second)
+	effects, _ := m["effects"].(map[string]any)
+	me, ok := effects[alice.id].(map[string]any)
+	if !ok {
+		t.Fatalf("broadcast powerups sem efeitos de %s: %v", alice.id, m)
+	}
+	if rest := int(me["tripleShot"].(float64)); rest <= 0 || rest > 200 {
+		t.Errorf("tripleShot restante = %d, want 1..200 ticks (10 s)", rest)
+	}
+	if me["vida"] != float64(0) || me["shield"] != float64(0) {
+		t.Errorf("efeitos = %v, want só tiro triplo ativo", me)
+	}
+
+	// ===== 3) Coleta do escudo: carga no HUD =====
+	for _, pu := range pus {
+		if pu.Kind == "escudo" && pu.X < e2eCoinSafeMaxX {
+			alvo = pu
+			break
+		}
+	}
+	if alvo.ID == "" {
+		t.Fatal("escudo da fase 1 não encontrado antes do fim do mapa")
+	}
+	m2 := alice.coletaPowerUp(alvo, 5*time.Second)
+	effects2, _ := m2["effects"].(map[string]any)
+	me2, ok := effects2[alice.id].(map[string]any)
+	if !ok {
+		t.Fatalf("broadcast powerups sem efeitos de %s após escudo: %v", alice.id, m2)
+	}
+	if me2["shield"] != float64(1) {
+		t.Errorf("shield = %v, want 1 carga", me2["shield"])
+	}
+	// o tiro triplo ainda está ativo (10 s não passaram)
+	if rest := int(me2["tripleShot"].(float64)); rest <= 0 {
+		t.Errorf("tripleShot restante = %d após coletar o escudo, want > 0", rest)
 	}
 }

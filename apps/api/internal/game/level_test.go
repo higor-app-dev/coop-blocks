@@ -471,3 +471,105 @@ func TestLevelCoinSpawnsScatterSeedDependente(t *testing.T) {
 		}
 	}
 }
+
+// TestLevelPowerUpSpawnsLimitados é o aceite central da task: power-ups são
+// RAROS e LIMITADOS por fase — no máximo PowerUpMaxPerPhase por fase, no
+// máximo UM de cada tipo (conjunto variado), e TODA fase tem pelo menos 1
+// (a geração garante candidatos: topos expostos de plataforma ou, no
+// fallback, o chão sólido). Posições válidas: tile sólido com espaço livre
+// acima — nunca enterrados em parede.
+func TestLevelPowerUpSpawnsLimitados(t *testing.T) {
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("%s_seed_%d", spec.name, seed)
+			t.Run(name, func(t *testing.T) {
+				l := genLevel(t, spec.width, spec.height, seed)
+
+				// Raridade em quantidade: teto por fase.
+				if len(l.PowerUpSpawns) > PowerUpMaxPerPhase {
+					t.Fatalf("%d power-ups, limite %d por fase", len(l.PowerUpSpawns), PowerUpMaxPerPhase)
+				}
+				if len(l.PowerUpSpawns) == 0 {
+					t.Fatal("fase sem power-ups — a geração garante pelo menos 1")
+				}
+
+				// No máximo um de cada tipo + posição sempre válida.
+				kinds := map[PowerUpType]int{}
+				for _, p := range l.PowerUpSpawns {
+					kinds[p.Kind]++
+					if !l.Solid(p.Tile.X, p.Tile.Y) {
+						t.Errorf("power-up %+v sem tile sólido abaixo", p)
+					}
+					if l.Solid(p.Tile.X, p.Tile.Y-1) {
+						t.Errorf("power-up %+v enterrado (tile sólido acima)", p)
+					}
+				}
+				for k, n := range kinds {
+					if n > 1 {
+						t.Errorf("seed %d: %d power-ups do tipo %s (máx 1 por fase)", seed, n, k)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestLevelPowerUpSpawnsDeterminismo verifica que a MESMA seed produz
+// exatamente o MESMO conjunto de power-ups (mesmos tiles, mesmos tipos, na
+// mesma ordem canônica) — aceite central da task.
+func TestLevelPowerUpSpawnsDeterminismo(t *testing.T) {
+	for _, spec := range testSpecs {
+		for _, seed := range testSeeds {
+			name := fmt.Sprintf("%s_seed_%d", spec.name, seed)
+			t.Run(name, func(t *testing.T) {
+				l1 := genLevel(t, spec.width, spec.height, seed)
+				l2 := genLevel(t, spec.width, spec.height, seed)
+				if len(l1.PowerUpSpawns) != len(l2.PowerUpSpawns) {
+					t.Fatalf("len(PowerUpSpawns) = %d vs %d", len(l1.PowerUpSpawns), len(l2.PowerUpSpawns))
+				}
+				for i := range l1.PowerUpSpawns {
+					if l1.PowerUpSpawns[i] != l2.PowerUpSpawns[i] {
+						t.Errorf("power-up %d: %+v vs %+v", i, l1.PowerUpSpawns[i], l2.PowerUpSpawns[i])
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestLevelPowerUpSpawnsSeedDependente verifica que o POSICIONAMENTO varia com
+// a seed: fases diferentes produzem conjuntos diferentes de power-ups
+// (posições e/ou tipos), como as moedas de plataforma.
+func TestLevelPowerUpSpawnsSeedDependente(t *testing.T) {
+	sigs := map[string]uint32{}
+	for _, seed := range testSeeds {
+		l := genLevel(t, 120, 12, seed)
+		key := fmt.Sprint(l.PowerUpSpawns)
+		sigs[key] = seed
+	}
+	if len(sigs) < 3 {
+		t.Errorf("apenas %d conjuntos de power-ups distintos entre %d seeds (esperava variação por seed)",
+			len(sigs), len(testSeeds))
+	}
+}
+
+// TestLevelPowerUpSpawnsRarosQueMoedas trava a raridade relativa: nas fases
+// com entropia suficiente, o número de power-ups é estritamente menor que o
+// de moedas. O spec mínimo (9×6) é excluído de propósito: a fase quase não
+// tem colunas de moedas (1-2), então 1-3 power-ups podem empatar ou passar —
+// é um caso degenerado de teste, não uma violação de raridade (a regra real
+// é o teto PowerUpMaxPerPhase por fase contra dezenas de moedas).
+func TestLevelPowerUpSpawnsRarosQueMoedas(t *testing.T) {
+	for _, spec := range testSpecs {
+		if spec.width < GapPeriod*2 {
+			continue // spec mínimo: poucas moedas, comparação degenerada
+		}
+		for _, seed := range testSeeds {
+			l := genLevel(t, spec.width, spec.height, seed)
+			if len(l.PowerUpSpawns) >= len(l.CoinSpawns) {
+				t.Errorf("seed %d: %d power-ups vs %d moedas — power-up deveria ser mais raro",
+					seed, len(l.PowerUpSpawns), len(l.CoinSpawns))
+			}
+		}
+	}
+}

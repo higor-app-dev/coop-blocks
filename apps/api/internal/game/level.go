@@ -79,9 +79,16 @@ type Tile struct {
 	Y int
 }
 
+// PowerUpSpawn é um power-up da fase: posição em coordenadas de tile
+// (multiplicar por TileSize para pixels) + tipo.
+type PowerUpSpawn struct {
+	Tile Tile
+	Kind PowerUpType
+}
+
 // Level é uma fase gerada: tiles sólidos, spawn do jogador, spawns de
-// inimigos e moedas em coordenadas de tile (multiplicar por TileSize para
-// pixels).
+// inimigos, moedas e power-ups em coordenadas de tile (multiplicar por
+// TileSize para pixels).
 type Level struct {
 	Spec        LevelSpec
 	GroundY     int // fileira do topo do chão (spec.Height - 2)
@@ -92,6 +99,11 @@ type Level struct {
 	// de plataforma), decididas pelo gerador — o CoinManager (coins.go)
 	// registra cada uma com ID único e converte tile→pixels no spawn.
 	CoinSpawns []Tile
+	// PowerUpSpawns são as posições e TIPOS dos power-ups da fase (raros —
+	// no máximo PowerUpMaxPerPhase, no máximo um de cada tipo, variação
+	// seed-dependente), decididas pelo gerador — o PowerUpManager
+	// (powerups.go) registra cada um com ID único e converte tile→pixels.
+	PowerUpSpawns []PowerUpSpawn
 
 	solid map[Tile]bool // índice interno de Solid() — populado por GenerateLevel
 }
@@ -243,6 +255,59 @@ func GenerateLevel(spec LevelSpec) (Level, error) {
 		}
 	}
 
+	// 6) Power-ups: RAROS e LIMITADOS — no máximo PowerUpMaxPerPhase por
+	//    fase (1 a 3), no máximo UM de cada tipo (conjunto variado), com
+	//    posições seed-dependentes. Candidatos: topos expostos de plataforma
+	//    (qualquer coluna); se a fase não tem plataformas, o chão sólido
+	//    (fallback — garante presença em toda fase). O sorteio usa stream
+	//    própria da seed (não altera a ordem de consumo do layout/moedas):
+	//    embaralhamento Fisher-Yates dos candidatos, contagem e rotação dos
+	//    tipos. Determinístico: mesma seed → mesmos power-ups (tiles E tipos).
+	var powerUpSpawns []PowerUpSpawn
+	powerRnd := newMulberry32(spec.Seed ^ 0x85EBCA6B) // stream própria
+
+	cands := make([]Tile, 0)
+	for t := range solid {
+		if t.Y >= groundY || hasTile(t.X, t.Y-1) {
+			continue // chão/enterrados não são candidatos (topo exposto acima do chão)
+		}
+		cands = append(cands, t)
+	}
+	if len(cands) == 0 {
+		// Fallback: fases sem plataformas usam o chão sólido.
+		for tx := 0; tx < spec.Width; tx++ {
+			if hasTile(tx, groundY) {
+				cands = append(cands, Tile{X: tx, Y: groundY})
+			}
+		}
+	}
+	// Entrada do embaralhamento ordenada (o laço sobre map não é ordenado).
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].X != cands[j].X {
+			return cands[i].X < cands[j].X
+		}
+		return cands[i].Y < cands[j].Y
+	})
+	// Fisher-Yates com a stream da seed: posições variam de fase para fase.
+	for i := len(cands) - 1; i > 0; i-- {
+		j := int(math.Floor(powerRnd() * float64(i+1)))
+		cands[i], cands[j] = cands[j], cands[i]
+	}
+	count := 1 + int(math.Floor(powerRnd()*PowerUpMaxPerPhase))
+	if count > len(cands) {
+		count = len(cands)
+	}
+	// Tipos: rotação da seed sobre [vida, tiro_triplo, escudo] — no máximo
+	// um de cada por fase.
+	rot := int(math.Floor(powerRnd() * 3))
+	kinds := []PowerUpType{PowerUpVida, PowerUpTiroTriplo, PowerUpEscudo}
+	for i := 0; i < count; i++ {
+		powerUpSpawns = append(powerUpSpawns, PowerUpSpawn{
+			Tile: cands[i],
+			Kind: kinds[(i+rot)%len(kinds)],
+		})
+	}
+
 	// Saída canônica: tiles ordenados e sem duplicatas.
 	tiles := make([]Tile, 0, len(solid))
 	for t := range solid {
@@ -266,8 +331,18 @@ func GenerateLevel(spec LevelSpec) (Level, error) {
 		}
 		return coinSpawns[i].Y < coinSpawns[j].Y
 	})
+	sort.Slice(powerUpSpawns, func(i, j int) bool {
+		if powerUpSpawns[i].Tile.X != powerUpSpawns[j].Tile.X {
+			return powerUpSpawns[i].Tile.X < powerUpSpawns[j].Tile.X
+		}
+		if powerUpSpawns[i].Tile.Y != powerUpSpawns[j].Tile.Y {
+			return powerUpSpawns[i].Tile.Y < powerUpSpawns[j].Tile.Y
+		}
+		return powerUpSpawns[i].Kind < powerUpSpawns[j].Kind
+	})
 	l.Tiles = tiles
 	l.CoinSpawns = coinSpawns
+	l.PowerUpSpawns = powerUpSpawns
 
 	return l, nil
 }
@@ -282,14 +357,15 @@ func (l *Level) Solid(x, y int) bool {
 }
 
 // Signature devolve uma representação canônica e determinística da fase
-// (tiles ordenados + spawns de inimigos + moedas). Duas fases têm a mesma
-// Signature sse forem idênticas — útil para comparar fases por seed e
-// detectar divergências client/servidor. O formato depende de CoinSpawns
-// estar ordenado (saída canônica de GenerateLevel).
+// (tiles ordenados + spawns de inimigos + moedas + power-ups). Duas fases
+// têm a mesma Signature sse forem idênticas — útil para comparar fases por
+// seed e detectar divergências client/servidor. O formato depende de
+// CoinSpawns e PowerUpSpawns estarem ordenados (saída canônica de
+// GenerateLevel).
 func (l *Level) Signature() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "w=%d h=%d ground=%d spawn=%d,%d enemies=%d coins=%d",
-		l.Spec.Width, l.Spec.Height, l.GroundY, l.PlayerSpawn.X, l.PlayerSpawn.Y, len(l.EnemySpawns), len(l.CoinSpawns))
+	fmt.Fprintf(&b, "w=%d h=%d ground=%d spawn=%d,%d enemies=%d coins=%d powerups=%d",
+		l.Spec.Width, l.Spec.Height, l.GroundY, l.PlayerSpawn.X, l.PlayerSpawn.Y, len(l.EnemySpawns), len(l.CoinSpawns), len(l.PowerUpSpawns))
 	for _, t := range l.Tiles {
 		fmt.Fprintf(&b, ";%d,%d", t.X, t.Y)
 	}
@@ -298,6 +374,9 @@ func (l *Level) Signature() string {
 	}
 	for _, c := range l.CoinSpawns {
 		fmt.Fprintf(&b, "~%d,%d", c.X, c.Y)
+	}
+	for _, p := range l.PowerUpSpawns {
+		fmt.Fprintf(&b, "&%d,%d,%d", p.Tile.X, p.Tile.Y, p.Kind)
 	}
 	return b.String()
 }

@@ -365,7 +365,7 @@ func TestBossResetLimpaESemeiaDeterministico(t *testing.T) {
 // argumento mantém o campo nulo no WIRE (JSON null) — compatível com
 // chamadas antigas e com o client que esconde a barra de HP sem boss.
 func TestWorldMsgCarregaBoss(t *testing.T) {
-	msg := WorldMsg(nil, nil, nil, nil, nil, &BossState{
+	msg := WorldMsg(nil, nil, nil, nil, nil, nil, nil, &BossState{
 		ID: "boss", X: 2832, Y: 384, HP: 400, MaxHP: 400, State: "idle", Phase: 5,
 	})
 	boss, ok := msg["boss"].(*BossState)
@@ -376,7 +376,7 @@ func TestWorldMsgCarregaBoss(t *testing.T) {
 		t.Errorf("boss no wire = %+v, want HP=400 state=idle", boss)
 	}
 	// Sem o argumento variádico (chamada antiga) o campo é nulo no wire.
-	msgAntigo := WorldMsg(nil, nil, nil, nil, nil)
+	msgAntigo := WorldMsg(nil, nil, nil, nil, nil, nil, nil)
 	if b, ok := msgAntigo["boss"].(*BossState); ok && b != nil {
 		t.Errorf("WorldMsg antiga: campo boss = %+v, want nulo", b)
 	}

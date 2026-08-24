@@ -353,6 +353,26 @@ func (s *Sim) SetMaxHP(id string, maxHP int) error {
 	return nil
 }
 
+// BoostHPAboveMax eleva o HP do jogador para MaxHP+bonus (se já estiver
+// acima, mantém) — efeito do power-up VIDA (+PowerUpVidaBonus acima do teto,
+// ex.: 100 → 125). Lê MaxHP e aplica SOB O MESMO LOCK (sem janela de corrida
+// com upgrades de max_hp da loja). Só SOBE (nunca regride o HP); o teto base
+// (MaxHP) não muda. O excedente é temporário por construção: respawn (Tick) e
+// ReviveAll restauram HP = MaxHP, então o bônus morre junto com o jogador e
+// na virada de fase. Jogador desconhecido devolve ErrPlayerNotFound.
+func (s *Sim) BoostHPAboveMax(id string, bonus int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.players[id]
+	if !ok {
+		return ErrPlayerNotFound
+	}
+	if target := p.MaxHP + bonus; target > p.HP {
+		p.HP = target
+	}
+	return nil
+}
+
 // ReviveAll revive TODOS os jogadores no início de uma nova fase: vivos com
 // HP cheio (teto individual preservado — upgrades da run nunca regridem), sem
 // respawn pendente. A carteira de moedas NÃO é tocada — a economia da run

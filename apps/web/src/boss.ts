@@ -82,7 +82,7 @@ export interface BossObject extends GameObj {
 }
 
 export function createBossLayer(k: KAPLAYCtx, opts: BossLayerOpts = {}): BossLayer {
-  const { add, pos, rect, color, z, destroy } = k;
+  const { add, pos, rect, color, area, z, destroy } = k;
 
   let obj: BossObject | null = null;
   let current: NetBoss | null = null;
@@ -94,6 +94,11 @@ export function createBossLayer(k: KAPLAYCtx, opts: BossLayerOpts = {}): BossLay
       pos(b.x, b.y),
       rect(BOSS_WIDTH, BOSS_HEIGHT, { radius: 8 }),
       color(r, g, bl),
+      // area() SEM body: habilita onCollide("bullet","boss") (tiro no boss
+      // no modo solo offline) sem bloquear a passagem do player — o bloco
+      // continua permissivo (players passam por cima/por baixo; o risco vem
+      // dos ataques, nunca de colisão de terreno).
+      area(),
       z(4),
       {
         bossId: b.id,

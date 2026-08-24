@@ -69,6 +69,7 @@ function makeFakeKaplay() {
     rect: vi.fn((w: number, h: number) => ({ kind: "rect", w, h })),
     color: vi.fn((r: number, g: number, b: number) => ({ r, g, b })),
     z: vi.fn((v: number) => ({ kind: "z", v })),
+    area: vi.fn(() => ({})),
     destroy: vi.fn((obj: FakeBossObj) => {
       destroyed.push(obj);
     }),

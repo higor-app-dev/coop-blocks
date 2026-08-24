@@ -253,20 +253,19 @@ onCollide("player", "enemy", (pl, en) => {
       pl.trigger("death");
       playDeath();
       particles.spawnEnemyDeath(pl.pos.x, pl.pos.y);
-      // Não destrói o objeto: esconde + pausa (o net.ts e os handlers ainda
-      // referenciam o mesmo player) e respawna no spawn após 3s — mesmo
-      // DefaultRespawnTicks do servidor. O teto respeita os upgrades.
+      // Squad wipe com 1 player (singleplayer local): a morte do único
+      // jogador = time inteiro morto → RESET da fase atual com a MESMA seed
+      // (moedas e inimigos renascem; o mundo é reconstruído idêntico).
+      // Delay de 3s = DefaultRespawnTicks do servidor. Não destrói o objeto:
+      // esconde + pausa (os handlers ainda referenciam o mesmo player) e o
+      // buildWorld reposiciona no spawn com HP cheio.
       localDead = true;
       pl.hidden = true;
       pl.paused = true;
       wait(3, () => {
-        pl.hidden = false;
-        pl.paused = false;
-        pl.hp = playerMaxHp;
-        pl.pos = vec2(level.playerSpawn.x, level.playerSpawn.y);
-        localDead = false;
+        buildWorld(currentLevelNumber, playerMaxHp);
         playPowerUp();
-        particles.spawnRespawn(pl.pos.x, pl.pos.y);
+        particles.spawnRespawn(player.pos.x, player.pos.y);
       });
     }
   }

@@ -812,8 +812,17 @@ export function startSolo(opts: SoloOpts): SoloSession {
   function damagePlayer(n: number): void {
     if (player.hp <= 0) return;
     // Escudo (offline — efeito de power-up/loja): consome 1 carga e zera o dano.
+    // O power-up (effects.shield) tem prioridade — é temporário; o upgrade da
+    // loja (run.stats.shield, espelho do AbsorbShield do servidor) é permanente
+    // até ser consumido. Mesmo feedback do main.ts antigo (hurtLocalPlayer).
     if (effects.shield > 0) {
       effects.shield -= 1;
+      audio.playPowerUp();
+      particles.spawnShootImpact(player.pos.x, player.pos.y);
+      return;
+    }
+    if (run.stats.shield > 0) {
+      run.stats.shield -= 1;
       audio.playPowerUp();
       particles.spawnShootImpact(player.pos.x, player.pos.y);
       return;

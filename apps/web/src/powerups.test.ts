@@ -62,6 +62,10 @@ function makeFakeKaplay() {
     rgb: vi.fn((r: number, g: number, b: number) => ({ r, g, b })),
     outline: vi.fn((w: number, c?: unknown) => ({ kind: "outline", w, c })),
     z: vi.fn((v: number) => ({ kind: "z", v })),
+    // area() SEM body — a camada só precisa do colisor para o onCollide do
+    // motor solo; o fake registra o componente como marcador (padrão do
+    // fake kaplay do boss-e2e).
+    area: vi.fn(() => ({ kind: "area" })),
     destroy: vi.fn((obj: FakePowerUpObj) => {
       destroyed.push(obj);
     }),

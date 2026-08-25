@@ -97,7 +97,7 @@ export interface PowerUpLayer {
 }
 
 export function createPowerUpLayer(k: KAPLAYCtx, opts: PowerUpLayerOpts = {}): PowerUpLayer {
-  const { add, pos, rect, color, outline, rgb, z, destroy } = k;
+  const { add, pos, rect, color, outline, rgb, z, area, destroy } = k;
   const objects = new Map<string, GameObj>();
 
   function spawn(p: NetPowerUp): GameObj {
@@ -108,6 +108,11 @@ export function createPowerUpLayer(k: KAPLAYCtx, opts: PowerUpLayerOpts = {}): P
       rect(p.w || POWERUP_WIDTH, p.h || POWERUP_HEIGHT, { radius: 6 }),
       color(r, g, b),
       outline(2, rgb(255, 255, 255)),
+      // area() SEM body (mesmo padrão do boss.ts): dá colisor para o
+      // onCollide("player","powerup") do motor solo (coleta offline) sem
+      // bloquear o player. No multiplayer o handler é serverDriven-guarded
+      // (a coleta é autoritativa do servidor via broadcast removed).
+      area(),
       z(4),
       { powerUpId: p.id, powerUpKind: p.kind },
     ]);
